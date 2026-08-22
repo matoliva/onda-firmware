@@ -19,6 +19,7 @@
 #define BUTTON_ACTIVE_LEVEL 0
 #define BUTTON_DEBOUNCE_MS 15U
 #define BUTTON_LONG_PRESS_US (1000LL * 1000LL)
+#define BUTTON_VERY_LONG_PRESS_US (3000LL * 1000LL)
 #define BUTTON_TASK_STACK_SIZE 4096U
 #define BUTTON_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
 
@@ -33,6 +34,7 @@ typedef struct {
     uint32_t notification_bit;
     bool pressed;
     bool long_press_reported;
+    bool very_long_press_reported;
     int64_t pressed_at_us;
 } button_state_t;
 
@@ -96,6 +98,7 @@ esp_err_t buttons_init(buttons_event_handler_t handler, void *context)
     for (size_t index = 0; index < sizeof(s_buttons) / sizeof(s_buttons[0]); ++index) {
         s_buttons[index].pressed = gpio_get_level(s_buttons[index].gpio) == BUTTON_ACTIVE_LEVEL;
         s_buttons[index].long_press_reported = false;
+        s_buttons[index].very_long_press_reported = false;
         s_buttons[index].pressed_at_us = esp_timer_get_time();
     }
 
@@ -185,6 +188,7 @@ static void buttons_process_level(button_state_t *button, int level)
     if (pressed) {
         button->pressed_at_us = now_us;
         button->long_press_reported = false;
+        button->very_long_press_reported = false;
         return;
     }
 
@@ -197,6 +201,7 @@ static void buttons_process_level(button_state_t *button, int level)
     }
 
     button->long_press_reported = false;
+    button->very_long_press_reported = false;
 }
 
 static void buttons_report_due_long_presses(void)
@@ -205,8 +210,7 @@ static void buttons_report_due_long_presses(void)
 
     for (size_t index = 0; index < sizeof(s_buttons) / sizeof(s_buttons[0]); ++index) {
         button_state_t *button = &s_buttons[index];
-        if (!button->pressed || button->long_press_reported ||
-            now_us - button->pressed_at_us < BUTTON_LONG_PRESS_US) {
+        if (!button->pressed) {
             continue;
         }
 
@@ -215,8 +219,15 @@ static void buttons_report_due_long_presses(void)
             continue;
         }
 
-        button->long_press_reported = true;
-        buttons_emit(button, BUTTON_EVENT_LONG_PRESS);
+        const int64_t held_us = now_us - button->pressed_at_us;
+        if (!button->long_press_reported && held_us >= BUTTON_LONG_PRESS_US) {
+            button->long_press_reported = true;
+            buttons_emit(button, BUTTON_EVENT_LONG_PRESS);
+        }
+        if (!button->very_long_press_reported && held_us >= BUTTON_VERY_LONG_PRESS_US) {
+            button->very_long_press_reported = true;
+            buttons_emit(button, BUTTON_EVENT_VERY_LONG_PRESS);
+        }
     }
 }
 
@@ -227,11 +238,14 @@ static TickType_t buttons_next_wait(void)
 
     for (size_t index = 0; index < sizeof(s_buttons) / sizeof(s_buttons[0]); ++index) {
         const button_state_t *button = &s_buttons[index];
-        if (!button->pressed || button->long_press_reported) {
+        if (!button->pressed || button->very_long_press_reported) {
             continue;
         }
 
-        const int64_t remaining_us = BUTTON_LONG_PRESS_US - (now_us - button->pressed_at_us);
+        const int64_t next_threshold_us = button->long_press_reported
+                                              ? BUTTON_VERY_LONG_PRESS_US
+                                              : BUTTON_LONG_PRESS_US;
+        const int64_t remaining_us = next_threshold_us - (now_us - button->pressed_at_us);
         if (remaining_us <= 0) {
             return 0;
         }

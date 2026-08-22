@@ -1,0 +1,7 @@
+# Production-only security overlay. Use only with a controlled factory device:
+# SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.secure.defaults" idf.py build
+# Flash encryption changes eFuses at first secure boot; do not use for daily development.
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE=y
+CONFIG_NVS_ENCRYPTION=y
+CONFIG_NVS_SEC_KEY_PROTECT_USING_FLASH_ENC=y

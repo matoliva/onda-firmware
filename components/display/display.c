@@ -61,7 +61,9 @@ static esp_err_t display_send_command(uint8_t command);
 static esp_err_t display_send_data(const uint8_t *data, size_t length);
 static esp_err_t display_transfer(const uint8_t *data, size_t length);
 static esp_err_t display_refresh(void);
-static esp_err_t display_show_screen(const char *state_label);
+static esp_err_t display_show_screen(const char *state_label,
+                                      const char *detail,
+                                      const char *proof_of_possession);
 static void display_release_transport(void);
 static void canvas_clear(uint8_t color);
 static void canvas_set_pixel(uint16_t x, uint16_t y, uint8_t color);
@@ -100,22 +102,44 @@ esp_err_t display_init(void)
     return ESP_OK;
 }
 
-esp_err_t display_show_ready(void)
+esp_err_t display_show_ready(bool wifi_connected)
 {
-    return display_show_screen("Ready");
+    return display_show_screen("Ready", wifi_connected ? "Wi-Fi connected" : "Recording available", NULL);
 }
 
 esp_err_t display_show_recording(void)
 {
-    return display_show_screen("Recording");
+    return display_show_screen("Recording", NULL, NULL);
 }
 
 esp_err_t display_show_error(void)
 {
-    return display_show_screen("Error");
+    return display_show_screen("Error", NULL, NULL);
 }
 
-static esp_err_t display_show_screen(const char *state_label)
+esp_err_t display_show_wifi_setup(const char *proof_of_possession)
+{
+    return display_show_screen("Wi-Fi setup", "Phone provisioning", proof_of_possession);
+}
+
+esp_err_t display_show_wifi_connecting(void)
+{
+    return display_show_screen("Connecting", "Wi-Fi", NULL);
+}
+
+esp_err_t display_show_offline(void)
+{
+    return display_show_screen("Offline", "Recording available", NULL);
+}
+
+esp_err_t display_show_wifi_error(void)
+{
+    return display_show_screen("Wi-Fi error", "Recording available", NULL);
+}
+
+static esp_err_t display_show_screen(const char *state_label,
+                                     const char *detail,
+                                     const char *proof_of_possession)
 {
     if (state_label == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -128,8 +152,15 @@ static esp_err_t display_show_screen(const char *state_label)
 
     ESP_LOGI(TAG, "Rendering %s screen", state_label);
     canvas_clear(EPD_COLOR_WHITE);
-    canvas_draw_centered_text("ONDA", 62, 3);
-    canvas_draw_centered_text(state_label, 116, 1);
+    canvas_draw_centered_text("ONDA", 44, 3);
+    canvas_draw_centered_text(state_label, 88, 2);
+    if (detail != NULL) {
+        canvas_draw_centered_text(detail, 122, 1);
+    }
+    if (proof_of_possession != NULL) {
+        canvas_draw_centered_text("PoP", 148, 1);
+        canvas_draw_centered_text(proof_of_possession, 174, 2);
+    }
 
     esp_err_t result = display_send_command(0x10);
     if (result == ESP_OK) {
