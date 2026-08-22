@@ -41,6 +41,8 @@
 
 #define EPD_COLOR_BLACK 0U
 #define EPD_COLOR_WHITE 1U
+#define EPD_COLOR_YELLOW 2U
+#define EPD_COLOR_RED 3U
 
 #define FONT12_ASCII_FIRST ' '
 #define FONT12_ASCII_LAST '~'
@@ -61,16 +63,39 @@ static esp_err_t display_send_command(uint8_t command);
 static esp_err_t display_send_data(const uint8_t *data, size_t length);
 static esp_err_t display_transfer(const uint8_t *data, size_t length);
 static esp_err_t display_refresh(void);
-static esp_err_t display_show_screen(const char *state_label,
-                                      const char *detail,
-                                      const char *proof_of_possession);
+static esp_err_t display_initialise_panel(void);
 static void display_release_transport(void);
 static void canvas_clear(uint8_t color);
 static void canvas_set_pixel(uint16_t x, uint16_t y, uint8_t color);
-static void canvas_draw_char(uint16_t x, uint16_t y, char character, uint8_t scale);
-static void canvas_draw_centered_text(const char *text, uint16_t y, uint8_t scale);
+static void canvas_draw_char(uint16_t x,
+                             uint16_t y,
+                             char character,
+                             uint8_t scale,
+                             uint8_t color);
+static void canvas_draw_centered_text(const char *text,
+                                      uint16_t y,
+                                      uint8_t scale,
+                                      uint8_t color);
+static void canvas_fill_rect(uint16_t x, uint16_t y, uint16_t width, uint16_t height, uint8_t color);
+static void canvas_draw_rect(uint16_t x,
+                             uint16_t y,
+                             uint16_t width,
+                             uint16_t height,
+                             uint8_t color);
+static void canvas_draw_line(uint16_t start_x,
+                             uint16_t start_y,
+                             uint16_t end_x,
+                             uint16_t end_y,
+                             uint8_t color);
+static void canvas_draw_wifi_arc(uint16_t center_x,
+                                 uint16_t top_y,
+                                 uint16_t half_width,
+                                 uint8_t color);
+static void canvas_draw_wifi_icon(display_wifi_status_t status);
+static void canvas_draw_battery_icon(display_battery_status_t status);
+static uint8_t display_color_to_epd(display_color_t color);
 
-esp_err_t display_init(void)
+static esp_err_t display_initialise_panel(void)
 {
     ESP_LOGI(TAG, "Initialising display");
 
@@ -102,67 +127,45 @@ esp_err_t display_init(void)
     return ESP_OK;
 }
 
-esp_err_t display_show_ready(bool wifi_connected)
+esp_err_t display_show(const display_screen_t *screen)
 {
-    return display_show_screen("Ready", wifi_connected ? "Wi-Fi connected" : "Recording available", NULL);
-}
-
-esp_err_t display_show_recording(void)
-{
-    return display_show_screen("Recording", NULL, NULL);
-}
-
-esp_err_t display_show_error(void)
-{
-    return display_show_screen("Error", NULL, NULL);
-}
-
-esp_err_t display_show_wifi_setup(const char *proof_of_possession)
-{
-    return display_show_screen("Wi-Fi setup", "Phone provisioning", proof_of_possession);
-}
-
-esp_err_t display_show_wifi_connecting(void)
-{
-    return display_show_screen("Connecting", "Wi-Fi", NULL);
-}
-
-esp_err_t display_show_offline(void)
-{
-    return display_show_screen("Offline", "Recording available", NULL);
-}
-
-esp_err_t display_show_wifi_error(void)
-{
-    return display_show_screen("Wi-Fi error", "Recording available", NULL);
-}
-
-static esp_err_t display_show_screen(const char *state_label,
-                                     const char *detail,
-                                     const char *proof_of_possession)
-{
-    if (state_label == NULL) {
+    if (screen == NULL || screen->title == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!s_panel_awake) {
-        ESP_LOGE(TAG, "Display is not initialised");
-        return ESP_ERR_INVALID_STATE;
+    esp_err_t result = display_initialise_panel();
+    if (result != ESP_OK) {
+        return result;
     }
 
-    ESP_LOGI(TAG, "Rendering %s screen", state_label);
+    const uint8_t title_color = display_color_to_epd(screen->title_color);
+    const uint8_t accent_color = display_color_to_epd(screen->accent_color);
+
+    ESP_LOGI(TAG, "Rendering %s screen", screen->title);
     canvas_clear(EPD_COLOR_WHITE);
-    canvas_draw_centered_text("ONDA", 44, 3);
-    canvas_draw_centered_text(state_label, 88, 2);
-    if (detail != NULL) {
-        canvas_draw_centered_text(detail, 122, 1);
+    canvas_draw_char(10, 10, 'O', 1, EPD_COLOR_BLACK);
+    canvas_draw_char(17, 10, 'N', 1, EPD_COLOR_BLACK);
+    canvas_draw_char(24, 10, 'D', 1, EPD_COLOR_BLACK);
+    canvas_draw_char(31, 10, 'A', 1, EPD_COLOR_BLACK);
+    canvas_draw_wifi_icon(screen->wifi_status);
+    canvas_draw_battery_icon(screen->battery_status);
+
+    if (screen->show_recording_indicator) {
+        canvas_fill_rect(20, 79, 8, 8, EPD_COLOR_RED);
     }
-    if (proof_of_possession != NULL) {
-        canvas_draw_centered_text("PoP", 148, 1);
-        canvas_draw_centered_text(proof_of_possession, 174, 2);
+    canvas_draw_centered_text(screen->title, 72, 2, title_color);
+    if (screen->detail_first_line != NULL) {
+        canvas_draw_centered_text(screen->detail_first_line, 112, 1, accent_color);
+    }
+    if (screen->detail_second_line != NULL) {
+        canvas_draw_centered_text(screen->detail_second_line, 128, 1, EPD_COLOR_BLACK);
+    }
+    if (screen->proof_of_possession != NULL) {
+        canvas_draw_centered_text("PoP", 150, 1, EPD_COLOR_BLACK);
+        canvas_draw_centered_text(screen->proof_of_possession, 166, 1, accent_color);
     }
 
-    esp_err_t result = display_send_command(0x10);
+    result = display_send_command(0x10);
     if (result == ESP_OK) {
         result = display_send_data(s_framebuffer, sizeof(s_framebuffer));
     }
@@ -171,7 +174,7 @@ static esp_err_t display_show_screen(const char *state_label,
     }
 
     if (result != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to refresh %s screen: %s", state_label, esp_err_to_name(result));
+        ESP_LOGE(TAG, "Failed to refresh %s screen: %s", screen->title, esp_err_to_name(result));
         gpio_set_level(DISPLAY_POWER_PIN, 1);
         s_panel_awake = false;
         return result;
@@ -185,7 +188,7 @@ static esp_err_t display_show_screen(const char *state_label,
         return result;
     }
 
-    ESP_LOGI(TAG, "Display %s", state_label);
+    ESP_LOGI(TAG, "Display %s", screen->title);
     return ESP_OK;
 }
 
@@ -445,7 +448,11 @@ static void canvas_set_pixel(uint16_t x, uint16_t y, uint8_t color)
     s_framebuffer[index] = (s_framebuffer[index] & ~(0x03U << shift)) | ((color & 0x03U) << shift);
 }
 
-static void canvas_draw_char(uint16_t x, uint16_t y, char character, uint8_t scale)
+static void canvas_draw_char(uint16_t x,
+                             uint16_t y,
+                             char character,
+                             uint8_t scale,
+                             uint8_t color)
 {
     if (character < FONT12_ASCII_FIRST || character > FONT12_ASCII_LAST) {
         character = '?';
@@ -462,20 +469,174 @@ static void canvas_draw_char(uint16_t x, uint16_t y, char character, uint8_t sca
                 for (uint8_t x_scale = 0; x_scale < scale; ++x_scale) {
                     canvas_set_pixel(x + (column * scale) + x_scale,
                                      y + (row * scale) + y_scale,
-                                     EPD_COLOR_BLACK);
+                                     color);
                 }
             }
         }
     }
 }
 
-static void canvas_draw_centered_text(const char *text, uint16_t y, uint8_t scale)
+static void canvas_draw_centered_text(const char *text,
+                                      uint16_t y,
+                                      uint8_t scale,
+                                      uint8_t color)
 {
+    if (text == NULL) {
+        return;
+    }
+
     const size_t text_length = strlen(text);
     const uint16_t text_width = (uint16_t)(text_length * Font12.Width * scale);
+    if (text_width > DISPLAY_WIDTH) {
+        return;
+    }
     const uint16_t x = (DISPLAY_WIDTH - text_width) / 2U;
 
     for (size_t index = 0; index < text_length; ++index) {
-        canvas_draw_char(x + (index * Font12.Width * scale), y, text[index], scale);
+        canvas_draw_char(x + (index * Font12.Width * scale), y, text[index], scale, color);
+    }
+}
+
+static void canvas_fill_rect(uint16_t x, uint16_t y, uint16_t width, uint16_t height, uint8_t color)
+{
+    for (uint16_t row = 0; row < height; ++row) {
+        for (uint16_t column = 0; column < width; ++column) {
+            canvas_set_pixel(x + column, y + row, color);
+        }
+    }
+}
+
+static void canvas_draw_rect(uint16_t x,
+                             uint16_t y,
+                             uint16_t width,
+                             uint16_t height,
+                             uint8_t color)
+{
+    if (width == 0U || height == 0U) {
+        return;
+    }
+
+    for (uint16_t column = 0; column < width; ++column) {
+        canvas_set_pixel(x + column, y, color);
+        canvas_set_pixel(x + column, y + height - 1U, color);
+    }
+    for (uint16_t row = 0; row < height; ++row) {
+        canvas_set_pixel(x, y + row, color);
+        canvas_set_pixel(x + width - 1U, y + row, color);
+    }
+}
+
+static void canvas_draw_line(uint16_t start_x,
+                             uint16_t start_y,
+                             uint16_t end_x,
+                             uint16_t end_y,
+                             uint8_t color)
+{
+    int16_t x = start_x;
+    int16_t y = start_y;
+    const int16_t delta_x = end_x > start_x ? (int16_t)(end_x - start_x) :
+                                             (int16_t)(start_x - end_x);
+    const int16_t step_x = start_x < end_x ? 1 : -1;
+    const int16_t delta_y = end_y > start_y ? (int16_t)(start_y - end_y) :
+                                             (int16_t)(end_y - start_y);
+    const int16_t step_y = start_y < end_y ? 1 : -1;
+    int16_t error = delta_x + delta_y;
+
+    for (;;) {
+        canvas_set_pixel((uint16_t)x, (uint16_t)y, color);
+        if (x == (int16_t)end_x && y == (int16_t)end_y) {
+            return;
+        }
+
+        const int16_t doubled_error = 2 * error;
+        if (doubled_error >= delta_y) {
+            error += delta_y;
+            x += step_x;
+        }
+        if (doubled_error <= delta_x) {
+            error += delta_x;
+            y += step_y;
+        }
+    }
+}
+
+static void canvas_draw_wifi_arc(uint16_t center_x,
+                                 uint16_t top_y,
+                                 uint16_t half_width,
+                                 uint8_t color)
+{
+    for (uint16_t offset = 0; offset <= half_width; ++offset) {
+        const uint16_t vertical_offset = (offset * offset) / (half_width + 3U);
+        const uint16_t left_x = center_x - offset;
+        const uint16_t right_x = center_x + offset;
+        const uint16_t y = top_y + vertical_offset;
+
+        canvas_set_pixel(left_x, y, color);
+        canvas_set_pixel(left_x, y + 1U, color);
+        canvas_set_pixel(right_x, y, color);
+        canvas_set_pixel(right_x, y + 1U, color);
+    }
+}
+
+static void canvas_draw_wifi_icon(display_wifi_status_t status)
+{
+    const uint16_t center_x = 161U;
+
+    canvas_draw_wifi_arc(center_x, 9U, 7U, EPD_COLOR_BLACK);
+    canvas_draw_wifi_arc(center_x, 14U, 4U, EPD_COLOR_BLACK);
+    canvas_fill_rect(center_x - 1U, 19U, 3U, 3U, EPD_COLOR_BLACK);
+
+    if (status == DISPLAY_WIFI_OFFLINE) {
+        canvas_draw_line(153U, 9U, 169U, 22U, EPD_COLOR_BLACK);
+    }
+}
+
+static void canvas_draw_battery_icon(display_battery_status_t status)
+{
+    const uint16_t x = 176U;
+    const uint16_t y = 10U;
+    const uint8_t color = status == DISPLAY_BATTERY_CRITICAL ? EPD_COLOR_RED : EPD_COLOR_BLACK;
+    uint16_t fill_width = 0U;
+
+    switch (status) {
+    case DISPLAY_BATTERY_HIGH:
+        fill_width = 12U;
+        break;
+    case DISPLAY_BATTERY_MEDIUM:
+        fill_width = 8U;
+        break;
+    case DISPLAY_BATTERY_LOW:
+        fill_width = 4U;
+        break;
+    case DISPLAY_BATTERY_CRITICAL:
+        fill_width = 2U;
+        break;
+    case DISPLAY_BATTERY_UNKNOWN:
+    default:
+        break;
+    }
+
+    canvas_draw_rect(x, y, 16U, 10U, color);
+    canvas_fill_rect(x + 16U, y + 3U, 2U, 4U, color);
+    if (fill_width > 0U) {
+        canvas_fill_rect(x + 2U, y + 2U, fill_width, 6U, color);
+    } else {
+        canvas_draw_char(x + 5U, y - 1U, '?', 1, color);
+    }
+}
+
+static uint8_t display_color_to_epd(display_color_t color)
+{
+    switch (color) {
+    case DISPLAY_COLOR_BLACK:
+        return EPD_COLOR_BLACK;
+    case DISPLAY_COLOR_WHITE:
+        return EPD_COLOR_WHITE;
+    case DISPLAY_COLOR_YELLOW:
+        return EPD_COLOR_YELLOW;
+    case DISPLAY_COLOR_RED:
+        return EPD_COLOR_RED;
+    default:
+        return EPD_COLOR_BLACK;
     }
 }
