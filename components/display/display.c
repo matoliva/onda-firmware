@@ -61,6 +61,7 @@ static esp_err_t display_send_command(uint8_t command);
 static esp_err_t display_send_data(const uint8_t *data, size_t length);
 static esp_err_t display_transfer(const uint8_t *data, size_t length);
 static esp_err_t display_refresh(void);
+static esp_err_t display_show_screen(const char *state_label);
 static void display_release_transport(void);
 static void canvas_clear(uint8_t color);
 static void canvas_set_pixel(uint16_t x, uint16_t y, uint8_t color);
@@ -101,15 +102,34 @@ esp_err_t display_init(void)
 
 esp_err_t display_show_ready(void)
 {
+    return display_show_screen("Ready");
+}
+
+esp_err_t display_show_recording(void)
+{
+    return display_show_screen("Recording");
+}
+
+esp_err_t display_show_error(void)
+{
+    return display_show_screen("Error");
+}
+
+static esp_err_t display_show_screen(const char *state_label)
+{
+    if (state_label == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     if (!s_panel_awake) {
         ESP_LOGE(TAG, "Display is not initialised");
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG, "Rendering ready screen");
+    ESP_LOGI(TAG, "Rendering %s screen", state_label);
     canvas_clear(EPD_COLOR_WHITE);
     canvas_draw_centered_text("ONDA", 62, 3);
-    canvas_draw_centered_text("Hardware ready", 116, 1);
+    canvas_draw_centered_text(state_label, 116, 1);
 
     esp_err_t result = display_send_command(0x10);
     if (result == ESP_OK) {
@@ -120,7 +140,7 @@ esp_err_t display_show_ready(void)
     }
 
     if (result != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to refresh ready screen: %s", esp_err_to_name(result));
+        ESP_LOGE(TAG, "Failed to refresh %s screen: %s", state_label, esp_err_to_name(result));
         gpio_set_level(DISPLAY_POWER_PIN, 1);
         s_panel_awake = false;
         return result;
@@ -134,7 +154,7 @@ esp_err_t display_show_ready(void)
         return result;
     }
 
-    ESP_LOGI(TAG, "Display ready");
+    ESP_LOGI(TAG, "Display %s", state_label);
     return ESP_OK;
 }
 
