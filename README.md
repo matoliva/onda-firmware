@@ -45,9 +45,13 @@ See [docs/development.md](docs/development.md) for the complete local workflow.
 
 ## Current phase
 
-Development follows the ordered plans in `plans/`. The initial implementation is
-[Phase 001 — Board Bring-Up](plans/001-board-bring-up.md). Later hardware and product
-features must not be introduced implicitly during an earlier phase.
+Proposed and active work lives in `plans/`. Completed and validated work moves to
+`decisions/`, preserving its feature number and replacing the completed plan.
+
+[Decision 001 — Board Bring-Up Baseline](decisions/001-board-bring-up.md) records
+the physically validated foundation. The next feature phase is the display;
+later hardware and product features must not be introduced implicitly during an
+earlier phase.
 
 ## Validation
 
