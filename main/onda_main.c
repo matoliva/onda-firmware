@@ -9,6 +9,8 @@
 #include "esp_psram.h"
 #include "sdkconfig.h"
 
+#include "display.h"
+
 #define BYTES_PER_MEBIBYTE (1024U * 1024U)
 #define EXPECTED_FLASH_SIZE_MB 8U
 #define EXPECTED_PSRAM_SIZE_MB 8U
@@ -76,4 +78,18 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "Board bring-up complete");
+
+    const esp_err_t display_init_result = display_init();
+    if (display_init_result != ESP_OK) {
+        ESP_LOGE(TAG, "Display initialisation failed: %s", esp_err_to_name(display_init_result));
+        return;
+    }
+
+    const esp_err_t display_ready_result = display_show_ready();
+    if (display_ready_result != ESP_OK) {
+        ESP_LOGE(TAG, "Display ready screen failed: %s", esp_err_to_name(display_ready_result));
+        return;
+    }
+
+    ESP_LOGI(TAG, "Onda ready");
 }
