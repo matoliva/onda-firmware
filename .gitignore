@@ -1,0 +1,10 @@
+# ESP-IDF generated files
+/build/
+/sdkconfig
+/sdkconfig.old
+
+# Managed component downloads are reproducible from their manifests and lockfile
+/managed_components/
+
+# macOS
+.DS_Store
