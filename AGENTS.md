@@ -348,6 +348,39 @@ Do not claim hardware behaviour has been verified unless it was actually tested 
 
 ---
 
+## Feature Documentation Lifecycle
+
+Use numbered feature documents to separate intended work from accepted outcomes.
+
+Before implementation:
+
+    plans/NNN-feature-name.md
+
+Plans contain the objective, scope, requirements, non-goals, validation steps, and completion criteria for proposed or active work.
+
+After implementation and all required validation:
+
+    decisions/NNN-feature-name.md
+
+Replace the completed plan with a decision record in the same change. Preserve the feature number and slug, and remove the corresponding file from `plans/`.
+
+A decision record must state:
+
+- status and completion date
+- context and problem
+- accepted implementation or behaviour
+- validation evidence
+- consequences and constraints for later work
+- follow-up work that remains out of scope
+
+Do not migrate a hardware-dependent plan until it has been tested on the physical device. A successful build alone is insufficient.
+
+Decision records are durable project history. Do not rewrite them as future plans or reuse their feature numbers. Update them only to correct evidence or record a deliberate change to the accepted outcome.
+
+The next feature must have a plan before implementation begins.
+
+---
+
 ## Testing
 
 Separate what can be tested without hardware from what requires the device.
@@ -437,3 +470,4 @@ For each feature:
 6. Documentation is updated when behaviour or setup changes.
 7. Hardware-dependent behaviour is tested on the physical device when applicable.
 8. No unrelated functionality is introduced.
+9. The completed plan is replaced by a decision record with validation evidence.
