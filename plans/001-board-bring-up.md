@@ -1,5 +1,7 @@
 # Phase 1 — Board Bring-Up
 
+**Status:** Complete — validated on the physical board on 2026-08-22.
+
 ## Objective
 
 Establish the first working Onda firmware running on the physical Waveshare ESP32-S3-ePaper-1.54G.
@@ -113,6 +115,25 @@ Physical-device validation:
 4. Confirm Onda startup logs.
 5. Confirm the firmware boots without crashes or reset loops.
 6. Confirm the expected flash and PSRAM configuration.
+
+### Validation evidence
+
+The Phase 1 firmware was flashed and monitored on the physical Waveshare board
+over its Espressif USB Serial/JTAG interface.
+
+Observed hardware and runtime results:
+
+- ESP32-S3-PICO-1, silicon revision v0.2
+- embedded 8 MB flash detected
+- embedded 8 MB octal PSRAM detected at 80 MHz
+- ESP-IDF PSRAM memory test passed
+- bootloader loaded the factory application successfully
+- Onda reported `Board bring-up complete`
+- two consecutive software reset and boot cycles completed without a crash or
+  reset loop
+
+The flash operation completed with image hash verification. No display, audio,
+storage, networking, or other later-phase peripheral was initialized.
 
 ## Completion Criteria
 

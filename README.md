@@ -45,9 +45,11 @@ See [docs/development.md](docs/development.md) for the complete local workflow.
 
 ## Current phase
 
-Development follows the ordered plans in `plans/`. The initial implementation is
-[Phase 001 — Board Bring-Up](plans/001-board-bring-up.md). Later hardware and product
-features must not be introduced implicitly during an earlier phase.
+Development follows the ordered plans in `plans/`.
+[Phase 001 — Board Bring-Up](plans/001-board-bring-up.md) has been implemented and
+validated on the physical board. The next feature phase is the display; later
+hardware and product features must not be introduced implicitly during an earlier
+phase.
 
 ## Validation
 
