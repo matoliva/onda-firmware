@@ -15,12 +15,14 @@ extern "C" {
  */
 esp_err_t display_init(void);
 
-/**
- * Draw the static Onda ready screen, refresh it once, and sleep the panel.
- *
- * display_init() must succeed before this function is called.
- */
+/** Draw the static Onda ready screen, refresh it once, and sleep the panel. */
 esp_err_t display_show_ready(void);
+
+/** Draw the static Onda recording screen, refresh it once, and sleep the panel. */
+esp_err_t display_show_recording(void);
+
+/** Draw the static Onda error screen, refresh it once, and sleep the panel. */
+esp_err_t display_show_error(void);
 
 #ifdef __cplusplus
 }
