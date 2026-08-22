@@ -1,3 +1,3 @@
 idf_component_register(SRCS "onda_main.c"
-                       PRIV_REQUIRES buttons display esp_psram spi_flash
+                       PRIV_REQUIRES audio buttons display esp_psram esp_timer spi_flash
                        INCLUDE_DIRS "")
