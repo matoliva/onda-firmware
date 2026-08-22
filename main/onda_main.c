@@ -9,6 +9,7 @@
 #include "esp_psram.h"
 #include "sdkconfig.h"
 
+#include "buttons.h"
 #include "display.h"
 
 #define BYTES_PER_MEBIBYTE (1024U * 1024U)
@@ -16,6 +17,16 @@
 #define EXPECTED_PSRAM_SIZE_MB 8U
 
 static const char *TAG = "ONDA";
+
+static void onda_handle_button_event(button_event_t event, void *context)
+{
+    (void)context;
+
+    const char *button_name = event.id == BUTTON_ID_BOOT ? "BOOT" : "PWR";
+    const char *event_name =
+        event.type == BUTTON_EVENT_SHORT_PRESS ? "short press" : "long press";
+    ESP_LOGI("ONDA_BUTTON", "%s %s", button_name, event_name);
+}
 
 void app_main(void)
 {
@@ -88,6 +99,12 @@ void app_main(void)
     const esp_err_t display_ready_result = display_show_ready();
     if (display_ready_result != ESP_OK) {
         ESP_LOGE(TAG, "Display ready screen failed: %s", esp_err_to_name(display_ready_result));
+        return;
+    }
+
+    const esp_err_t buttons_init_result = buttons_init(onda_handle_button_event, NULL);
+    if (buttons_init_result != ESP_OK) {
+        ESP_LOGE(TAG, "Button input initialisation failed: %s", esp_err_to_name(buttons_init_result));
         return;
     }
 
