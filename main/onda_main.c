@@ -16,7 +16,7 @@
 
 #include "audio.h"
 #include "buttons.h"
-#include "display.h"
+#include "device_ui.h"
 #include "wifi.h"
 
 #define BYTES_PER_MEBIBYTE (1024U * 1024U)
@@ -31,7 +31,6 @@
 #define ONDA_DISPLAY_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
 #define ONDA_AUDIO_BUFFER_SAMPLES 512U
 #define ONDA_AUDIO_READ_TIMEOUT_MS 100U
-#define ONDA_WIFI_POP_LENGTH 8U
 
 static const char *TAG = "ONDA";
 
@@ -48,25 +47,14 @@ typedef enum {
     ONDA_COMMAND_DISPLAY_FAILURE,
 } onda_command_t;
 
-typedef enum {
-    ONDA_DISPLAY_READY,
-    ONDA_DISPLAY_RECORDING,
-    ONDA_DISPLAY_ERROR,
-    ONDA_DISPLAY_WIFI_SETUP,
-    ONDA_DISPLAY_WIFI_CONNECTING,
-    ONDA_DISPLAY_OFFLINE,
-    ONDA_DISPLAY_WIFI_ERROR,
-} onda_display_state_t;
-
 typedef struct {
     onda_command_t command;
     wifi_state_t wifi_state;
-    char proof_of_possession[ONDA_WIFI_POP_LENGTH + 1U];
+    char proof_of_possession[DEVICE_UI_PROOF_OF_POSSESSION_LENGTH + 1U];
 } onda_application_command_t;
 
 typedef struct {
-    onda_display_state_t state;
-    char proof_of_possession[ONDA_WIFI_POP_LENGTH + 1U];
+    device_ui_state_t state;
 } onda_display_request_t;
 
 static QueueHandle_t s_application_command_queue;
@@ -96,9 +84,10 @@ static void onda_enter_error(onda_state_t *state,
 static esp_err_t onda_schedule_display(onda_state_t recording_state,
                                        wifi_state_t network_state,
                                        const char *proof_of_possession);
-static esp_err_t onda_render_display(const onda_display_request_t *request);
-static onda_display_state_t onda_select_display_state(onda_state_t recording_state,
-                                                      wifi_state_t network_state);
+static esp_err_t onda_render_display(const device_ui_state_t *state);
+static device_ui_primary_state_t onda_select_ui_primary_state(onda_state_t recording_state,
+                                                              wifi_state_t network_state);
+static device_ui_wifi_status_t onda_select_ui_wifi_status(wifi_state_t network_state);
 static const char *onda_state_name(onda_state_t state);
 static const char *onda_wifi_state_name(wifi_state_t state);
 
@@ -276,7 +265,7 @@ static void onda_application_task(void *context)
 
     onda_state_t recording_state = ONDA_STATE_READY;
     wifi_state_t network_state = WIFI_STATE_UNCONFIGURED;
-    char proof_of_possession[ONDA_WIFI_POP_LENGTH + 1U] = {0};
+    char proof_of_possession[DEVICE_UI_PROOF_OF_POSSESSION_LENGTH + 1U] = {0};
 
     for (;;) {
         onda_application_command_t command;
@@ -307,17 +296,29 @@ static void onda_display_task(void *context)
 {
     (void)context;
 
+    device_ui_state_t last_rendered_state = {0};
+    bool has_rendered_state = false;
+
     for (;;) {
         onda_display_request_t request;
         xQueueReceive(s_display_state_queue, &request, portMAX_DELAY);
 
-        const esp_err_t result = onda_render_display(&request);
+        if (!device_ui_should_refresh(has_rendered_state ? &last_rendered_state : NULL,
+                                      &request.state)) {
+            ESP_LOGI(TAG, "Skipping display refresh for unchanged primary UI state");
+            continue;
+        }
+
+        const esp_err_t result = onda_render_display(&request.state);
         if (result == ESP_OK) {
+            last_rendered_state = request.state;
+            has_rendered_state = true;
             continue;
         }
 
         ESP_LOGE(TAG, "Failed to render display: %s", esp_err_to_name(result));
-        if (request.state == ONDA_DISPLAY_ERROR || s_application_command_queue == NULL) {
+        if (request.state.primary_state == DEVICE_UI_PRIMARY_ERROR ||
+            s_application_command_queue == NULL) {
             continue;
         }
 
@@ -357,18 +358,21 @@ static void onda_handle_command(onda_state_t *recording_state,
         ESP_LOGI(TAG, "Requesting Wi-Fi reconfiguration");
         if (wifi_request_reprovision() != ESP_OK) {
             *network_state = WIFI_STATE_ERROR;
+            (void)onda_schedule_display(*recording_state, *network_state, proof_of_possession);
         }
-        (void)onda_schedule_display(*recording_state, *network_state, proof_of_possession);
         break;
     case ONDA_COMMAND_WIFI_STATE_CHANGED:
         *network_state = command->wifi_state;
         if (command->proof_of_possession[0] != '\0') {
             memcpy(proof_of_possession,
                    command->proof_of_possession,
-                   ONDA_WIFI_POP_LENGTH + 1U);
+                   DEVICE_UI_PROOF_OF_POSSESSION_LENGTH + 1U);
         }
         ESP_LOGI(TAG, "Wi-Fi state: %s", onda_wifi_state_name(*network_state));
-        if (*network_state != WIFI_STATE_UNCONFIGURED) {
+        if (*network_state == WIFI_STATE_PROVISIONING ||
+            *network_state == WIFI_STATE_CONNECTED ||
+            *network_state == WIFI_STATE_OFFLINE ||
+            *network_state == WIFI_STATE_ERROR) {
             (void)onda_schedule_display(*recording_state, *network_state, proof_of_possession);
         }
         break;
@@ -460,71 +464,66 @@ static esp_err_t onda_schedule_display(onda_state_t recording_state,
     }
 
     onda_display_request_t request = {
-        .state = onda_select_display_state(recording_state, network_state),
+        .state = {
+            .primary_state = onda_select_ui_primary_state(recording_state, network_state),
+            .wifi_status = onda_select_ui_wifi_status(network_state),
+            .battery_status = DEVICE_UI_BATTERY_UNKNOWN,
+        },
     };
-    if (proof_of_possession != NULL && request.state == ONDA_DISPLAY_WIFI_SETUP) {
-        strncpy(request.proof_of_possession,
+    if (proof_of_possession != NULL &&
+        request.state.primary_state == DEVICE_UI_PRIMARY_WIFI_SETUP) {
+        strncpy(request.state.proof_of_possession,
                 proof_of_possession,
-                sizeof(request.proof_of_possession) - 1U);
+                sizeof(request.state.proof_of_possession) - 1U);
     }
 
     return xQueueOverwrite(s_display_state_queue, &request) == pdPASS ? ESP_OK : ESP_FAIL;
 }
 
-static esp_err_t onda_render_display(const onda_display_request_t *request)
+static esp_err_t onda_render_display(const device_ui_state_t *state)
 {
-    if (request == NULL) {
+    if (state == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    const esp_err_t init_result = display_init();
-    if (init_result != ESP_OK) {
-        return init_result;
-    }
-
-    switch (request->state) {
-    case ONDA_DISPLAY_READY:
-        return display_show_ready(true);
-    case ONDA_DISPLAY_RECORDING:
-        return display_show_recording();
-    case ONDA_DISPLAY_ERROR:
-        return display_show_error();
-    case ONDA_DISPLAY_WIFI_SETUP:
-        return display_show_wifi_setup(request->proof_of_possession);
-    case ONDA_DISPLAY_WIFI_CONNECTING:
-        return display_show_wifi_connecting();
-    case ONDA_DISPLAY_OFFLINE:
-        return display_show_offline();
-    case ONDA_DISPLAY_WIFI_ERROR:
-        return display_show_wifi_error();
-    default:
-        return ESP_ERR_INVALID_ARG;
-    }
+    return device_ui_show(state);
 }
 
-static onda_display_state_t onda_select_display_state(onda_state_t recording_state,
-                                                      wifi_state_t network_state)
+static device_ui_primary_state_t onda_select_ui_primary_state(onda_state_t recording_state,
+                                                              wifi_state_t network_state)
 {
     if (recording_state == ONDA_STATE_RECORDING) {
-        return ONDA_DISPLAY_RECORDING;
+        return DEVICE_UI_PRIMARY_RECORDING;
     }
     if (recording_state == ONDA_STATE_ERROR) {
-        return ONDA_DISPLAY_ERROR;
+        return DEVICE_UI_PRIMARY_ERROR;
     }
 
     switch (network_state) {
     case WIFI_STATE_UNCONFIGURED:
     case WIFI_STATE_PROVISIONING:
-        return ONDA_DISPLAY_WIFI_SETUP;
+        return DEVICE_UI_PRIMARY_WIFI_SETUP;
     case WIFI_STATE_CONNECTING:
-        return ONDA_DISPLAY_WIFI_CONNECTING;
     case WIFI_STATE_CONNECTED:
-        return ONDA_DISPLAY_READY;
     case WIFI_STATE_OFFLINE:
-        return ONDA_DISPLAY_OFFLINE;
     case WIFI_STATE_ERROR:
     default:
-        return ONDA_DISPLAY_WIFI_ERROR;
+        return DEVICE_UI_PRIMARY_READY;
+    }
+}
+
+static device_ui_wifi_status_t onda_select_ui_wifi_status(wifi_state_t network_state)
+{
+    switch (network_state) {
+    case WIFI_STATE_CONNECTED:
+        return DEVICE_UI_WIFI_CONNECTED;
+    case WIFI_STATE_UNCONFIGURED:
+    case WIFI_STATE_PROVISIONING:
+    case WIFI_STATE_CONNECTING:
+    case WIFI_STATE_OFFLINE:
+    case WIFI_STATE_ERROR:
+    default:
+        return DEVICE_UI_WIFI_OFFLINE;
     }
 }
 

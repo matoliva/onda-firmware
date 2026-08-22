@@ -290,6 +290,28 @@ Use when a normal incremental build behaves unexpectedly.
 
 ---
 
+## Component Unit Tests
+
+Onda keeps hardware-independent component tests in each component's `test/`
+directory. Build a component's ESP-IDF Unity tests through ESP-IDF's Unit Test
+App, exposing Onda's components with `IDF_EXTRA_COMPONENT_DIRS`:
+
+```bash
+cd ~/projects/onda-firmware
+get_idf
+export IDF_EXTRA_COMPONENT_DIRS="$PWD/components"
+cd "$IDF_PATH/tools/unit-test-app"
+idf.py set-target esp32s3
+idf.py -T device_ui build
+```
+
+This builds the test firmware only; it does not flash a board. To execute the
+tests on physical hardware, flash the resulting Unit Test App and choose the
+`[device_ui]` tests from its serial menu. Do not use this test firmware for
+normal device validation or release flashing.
+
+---
+
 ## Full Clean
 
 ```bash
