@@ -15,6 +15,7 @@ typedef enum {
 typedef enum {
     BUTTON_EVENT_SHORT_PRESS,
     BUTTON_EVENT_LONG_PRESS,
+    BUTTON_EVENT_VERY_LONG_PRESS,
 } button_event_type_t;
 
 typedef struct {

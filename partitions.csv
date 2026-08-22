@@ -1,0 +1,6 @@
+# Name,     Type, SubType,  Offset, Size, Flags
+# Wi-Fi credentials are stored in the default encrypted NVS partition in secure builds.
+nvs,        data, nvs,      ,      0x6000,
+nvs_keys,   data, nvs_keys, ,      0x1000, encrypted
+phy_init,   data, phy,      ,      0x1000,
+factory,    app,  factory,  ,      2M,
