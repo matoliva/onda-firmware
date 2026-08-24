@@ -15,7 +15,11 @@ extern "C" {
 typedef enum {
     DEVICE_UI_PRIMARY_READY,
     DEVICE_UI_PRIMARY_RECORDING,
+    DEVICE_UI_PRIMARY_FINALIZING,
+    DEVICE_UI_PRIMARY_SAVED,
     DEVICE_UI_PRIMARY_WIFI_SETUP,
+    DEVICE_UI_PRIMARY_STORAGE_ERROR,
+    DEVICE_UI_PRIMARY_AUDIO_ERROR,
     DEVICE_UI_PRIMARY_ERROR,
 } device_ui_primary_state_t;
 
@@ -25,6 +29,12 @@ typedef enum {
 } device_ui_wifi_status_t;
 
 typedef enum {
+    DEVICE_UI_STORAGE_AVAILABLE,
+    DEVICE_UI_STORAGE_UNAVAILABLE,
+    DEVICE_UI_STORAGE_ERROR,
+} device_ui_storage_status_t;
+
+typedef enum {
     DEVICE_UI_BATTERY_UNKNOWN,
     DEVICE_UI_BATTERY_HIGH,
     DEVICE_UI_BATTERY_MEDIUM,
@@ -32,11 +42,17 @@ typedef enum {
     DEVICE_UI_BATTERY_CRITICAL,
 } device_ui_battery_status_t;
 
+#define DEVICE_UI_SAVED_DURATION_LENGTH 8U
+#define DEVICE_UI_SAVED_FILENAME_LENGTH 40U
+
 typedef struct {
     device_ui_primary_state_t primary_state;
     device_ui_wifi_status_t wifi_status;
+    device_ui_storage_status_t storage_status;
     device_ui_battery_status_t battery_status;
     char proof_of_possession[DEVICE_UI_PROOF_OF_POSSESSION_LENGTH + 1U];
+    char saved_duration[DEVICE_UI_SAVED_DURATION_LENGTH + 1U];
+    char saved_filename[DEVICE_UI_SAVED_FILENAME_LENGTH + 1U];
 } device_ui_state_t;
 
 /**

@@ -22,6 +22,12 @@ typedef enum {
 } display_wifi_status_t;
 
 typedef enum {
+    DISPLAY_STORAGE_AVAILABLE,
+    DISPLAY_STORAGE_UNAVAILABLE,
+    DISPLAY_STORAGE_ERROR,
+} display_storage_status_t;
+
+typedef enum {
     DISPLAY_BATTERY_UNKNOWN,
     DISPLAY_BATTERY_HIGH,
     DISPLAY_BATTERY_MEDIUM,
@@ -41,6 +47,7 @@ typedef struct {
     display_color_t title_color;
     display_color_t accent_color;
     display_wifi_status_t wifi_status;
+    display_storage_status_t storage_status;
     display_battery_status_t battery_status;
     bool show_recording_indicator;
 } display_screen_t;

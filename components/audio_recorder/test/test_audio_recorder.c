@@ -66,3 +66,12 @@ TEST_CASE("audio recorder ignores incomplete PCM frames", "[audio_recorder]")
     TEST_ASSERT_EQUAL_UINT32(0U,
                              audio_recorder_downmix_stereo(input, 0U, output, sizeof(output)));
 }
+
+TEST_CASE("audio recorder requires a closed WAV header and nonempty PCM payload", "[audio_recorder]")
+{
+    TEST_ASSERT_TRUE(audio_recorder_has_valid_file_size(AUDIO_RECORDER_WAV_HEADER_SIZE + 32000U,
+                                                         32000U));
+    TEST_ASSERT_FALSE(audio_recorder_has_valid_file_size(AUDIO_RECORDER_WAV_HEADER_SIZE, 0U));
+    TEST_ASSERT_FALSE(audio_recorder_has_valid_file_size(AUDIO_RECORDER_WAV_HEADER_SIZE + 1U,
+                                                          32000U));
+}

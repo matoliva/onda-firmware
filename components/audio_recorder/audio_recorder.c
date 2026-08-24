@@ -13,8 +13,6 @@
 #include "freertos/task.h"
 #include "storage.h"
 
-#define AUDIO_RECORDER_FINAL_PATH "/sdcard/test.wav"
-#define AUDIO_RECORDER_STAGING_PATH "/sdcard/test.wav.part"
 #define AUDIO_RECORDER_SAMPLE_RATE_HZ 16000U
 #define AUDIO_RECORDER_CHANNEL_COUNT 1U
 #define AUDIO_RECORDER_BITS_PER_SAMPLE 16U
@@ -30,8 +28,7 @@
 static const char *TAG = "ONDA_RECORDER";
 
 static TaskHandle_t s_task_handle;
-static audio_recorder_completion_callback_t s_completion_callback;
-static void *s_completion_context;
+static audio_recorder_config_t s_config;
 static DMA_ATTR int16_t s_capture_buffer[AUDIO_RECORDER_CAPTURE_SAMPLES];
 static int16_t s_mono_buffer[AUDIO_RECORDER_CAPTURE_SAMPLES / 2U];
 static StackType_t s_task_stack[AUDIO_RECORDER_TASK_STACK_SIZE];
@@ -41,19 +38,21 @@ static void audio_recorder_task(void *context);
 static esp_err_t audio_recorder_write_header(storage_file_t *file, uint32_t data_bytes);
 static void audio_recorder_write_u16_le(uint8_t *destination, uint16_t value);
 static void audio_recorder_write_u32_le(uint8_t *destination, uint32_t value);
-static void audio_recorder_complete(esp_err_t result, size_t data_bytes);
+static void audio_recorder_complete(audio_recorder_completion_kind_t kind,
+                                    esp_err_t error,
+                                    size_t data_bytes);
 
-esp_err_t audio_recorder_start(audio_recorder_completion_callback_t callback, void *context)
+esp_err_t audio_recorder_start(const audio_recorder_config_t *config)
 {
-    if (callback == NULL) {
+    if (config == NULL || config->completion_callback == NULL || config->final_path[0] == '\0' ||
+        config->staging_path[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
     if (s_task_handle != NULL) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    s_completion_callback = callback;
-    s_completion_context = context;
+    s_config = *config;
     s_task_handle = xTaskCreateStatic(audio_recorder_task,
                                       "onda_recorder",
                                       AUDIO_RECORDER_TASK_STACK_SIZE,
@@ -62,8 +61,7 @@ esp_err_t audio_recorder_start(audio_recorder_completion_callback_t callback, vo
                                       s_task_stack,
                                       &s_task_buffer);
     if (s_task_handle == NULL) {
-        s_completion_callback = NULL;
-        s_completion_context = NULL;
+        memset(&s_config, 0, sizeof(s_config));
         ESP_LOGE(TAG, "Failed to create recorder task");
         return ESP_ERR_NO_MEM;
     }
@@ -129,6 +127,12 @@ size_t audio_recorder_downmix_stereo(const int16_t *input,
     return frame_count * sizeof(output[0]);
 }
 
+bool audio_recorder_has_valid_file_size(size_t file_size, size_t data_bytes)
+{
+    return data_bytes > 0U && data_bytes <= SIZE_MAX - AUDIO_RECORDER_WAV_HEADER_SIZE &&
+           file_size == AUDIO_RECORDER_WAV_HEADER_SIZE + data_bytes;
+}
+
 static void audio_recorder_task(void *context)
 {
     (void)context;
@@ -137,7 +141,8 @@ static void audio_recorder_task(void *context)
     size_t data_bytes = 0U;
     size_t next_progress_bytes = AUDIO_RECORDER_BYTES_PER_SECOND;
     bool capture_started = false;
-    esp_err_t result = storage_file_create(AUDIO_RECORDER_STAGING_PATH, &file);
+    audio_recorder_completion_kind_t completion_kind = AUDIO_RECORDER_COMPLETION_STORAGE_ERROR;
+    esp_err_t result = storage_file_create_exclusive(s_config.staging_path, &file);
     if (result != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create staging file: %s", esp_err_to_name(result));
         goto finish;
@@ -152,10 +157,11 @@ static void audio_recorder_task(void *context)
     result = audio_start();
     if (result != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start microphone capture: %s", esp_err_to_name(result));
+        completion_kind = AUDIO_RECORDER_COMPLETION_AUDIO_ERROR;
         goto cleanup_file;
     }
     capture_started = true;
-    ESP_LOGI(TAG, "Recording started: %s", AUDIO_RECORDER_STAGING_PATH);
+    ESP_LOGI(TAG, "Recording started: %s", s_config.staging_path);
 
     for (;;) {
         if (ulTaskNotifyTake(pdTRUE, 0) != 0U) {
@@ -170,6 +176,7 @@ static void audio_recorder_task(void *context)
         if (read_result != ESP_OK && read_result != ESP_ERR_TIMEOUT) {
             ESP_LOGE(TAG, "Microphone capture failed: %s", esp_err_to_name(read_result));
             result = read_result;
+            completion_kind = AUDIO_RECORDER_COMPLETION_AUDIO_ERROR;
             goto cleanup_capture;
         }
         if (bytes_read == 0U) {
@@ -211,6 +218,7 @@ cleanup_capture:
         if (stop_result != ESP_OK && result == ESP_OK) {
             ESP_LOGE(TAG, "Failed to stop microphone capture: %s", esp_err_to_name(stop_result));
             result = stop_result;
+            completion_kind = AUDIO_RECORDER_COMPLETION_AUDIO_ERROR;
         }
         capture_started = false;
     }
@@ -236,12 +244,33 @@ cleanup_capture:
         goto remove_staging;
     }
 
-    result = storage_file_replace(AUDIO_RECORDER_STAGING_PATH, AUDIO_RECORDER_FINAL_PATH);
+    size_t staged_size = 0U;
+    result = storage_file_get_size(s_config.staging_path, &staged_size);
+    if (result != ESP_OK || !audio_recorder_has_valid_file_size(staged_size, data_bytes)) {
+        if (result == ESP_OK) {
+            result = ESP_ERR_INVALID_SIZE;
+        }
+        ESP_LOGE(TAG, "Staged WAV verification failed");
+        goto remove_staging;
+    }
+
+    result = storage_file_publish(s_config.staging_path, s_config.final_path);
     if (result != ESP_OK) {
         goto remove_staging;
     }
 
-    ESP_LOGI(TAG, "Recording complete: %u bytes", (unsigned)data_bytes);
+    size_t final_size = 0U;
+    result = storage_file_get_size(s_config.final_path, &final_size);
+    if (result != ESP_OK || !audio_recorder_has_valid_file_size(final_size, data_bytes)) {
+        if (result == ESP_OK) {
+            result = ESP_ERR_INVALID_SIZE;
+        }
+        ESP_LOGE(TAG, "Published WAV verification failed");
+        goto finish;
+    }
+
+    ESP_LOGI(TAG, "Recording complete: %s, %u bytes", s_config.final_path, (unsigned)data_bytes);
+    completion_kind = AUDIO_RECORDER_COMPLETION_SUCCESS;
     goto finish;
 
 cleanup_file:
@@ -254,12 +283,12 @@ cleanup_file:
     }
 
 remove_staging:
-    if (storage_file_remove(AUDIO_RECORDER_STAGING_PATH) != ESP_OK) {
+    if (storage_file_remove(s_config.staging_path) != ESP_OK) {
         ESP_LOGW(TAG, "Failed to remove incomplete staging file");
     }
 
 finish:
-    audio_recorder_complete(result, data_bytes);
+    audio_recorder_complete(completion_kind, result, data_bytes);
     vTaskDelete(NULL);
 }
 
@@ -289,15 +318,26 @@ static void audio_recorder_write_u32_le(uint8_t *destination, uint32_t value)
     destination[3] = (uint8_t)(value >> 24U);
 }
 
-static void audio_recorder_complete(esp_err_t result, size_t data_bytes)
+static void audio_recorder_complete(audio_recorder_completion_kind_t kind,
+                                    esp_err_t error,
+                                    size_t data_bytes)
 {
-    const audio_recorder_completion_callback_t callback = s_completion_callback;
-    void *const context = s_completion_context;
+    const audio_recorder_completion_callback_t callback = s_config.completion_callback;
+    void *const context = s_config.completion_context;
+    const audio_recorder_completion_t completion = {
+        .kind = kind,
+        .error = error,
+        .data_bytes = data_bytes,
+        .final_path = "",
+    };
+    audio_recorder_completion_t completion_with_path = completion;
+    strncpy(completion_with_path.final_path,
+            s_config.final_path,
+            sizeof(completion_with_path.final_path) - 1U);
     s_task_handle = NULL;
-    s_completion_callback = NULL;
-    s_completion_context = NULL;
+    memset(&s_config, 0, sizeof(s_config));
 
     if (callback != NULL) {
-        callback(result, data_bytes, context);
+        callback(&completion_with_path, context);
     }
 }
