@@ -17,6 +17,7 @@
 #include "audio.h"
 #include "buttons.h"
 #include "device_ui.h"
+#include "storage.h"
 #include "wifi.h"
 
 #define BYTES_PER_MEBIBYTE (1024U * 1024U)
@@ -209,6 +210,21 @@ void app_main(void)
     if (!hardware_matches) {
         ESP_LOGE(TAG, "Board bring-up checks failed");
         return;
+    }
+
+    const esp_err_t storage_result = storage_init();
+    if (storage_result != ESP_OK) {
+        ESP_LOGW(TAG, "SD card unavailable: %s", esp_err_to_name(storage_result));
+    } else {
+        const esp_err_t verification_result = storage_verify();
+        if (verification_result != ESP_OK) {
+            ESP_LOGW(TAG, "SD card verification failed: %s", esp_err_to_name(verification_result));
+        }
+
+        const esp_err_t storage_deinit_result = storage_deinit();
+        if (storage_deinit_result != ESP_OK) {
+            ESP_LOGW(TAG, "SD card cleanup failed: %s", esp_err_to_name(storage_deinit_result));
+        }
     }
 
     const esp_err_t audio_result = audio_init();

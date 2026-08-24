@@ -12,3 +12,7 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
+
+# Phase 008 SD-card baseline stores its Onda-owned diagnostic file as
+# /sdcard/onda-test.txt, which requires FAT long filename support.
+CONFIG_FATFS_LFN_STACK=y
