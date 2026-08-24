@@ -3,7 +3,6 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "esp_attr.h"
 #include "esp_chip_info.h"
 #include "esp_err.h"
 #include "esp_flash.h"
@@ -15,6 +14,7 @@
 #include "sdkconfig.h"
 
 #include "audio.h"
+#include "audio_recorder.h"
 #include "buttons.h"
 #include "device_ui.h"
 #include "storage.h"
@@ -30,8 +30,6 @@
 #define ONDA_APPLICATION_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
 #define ONDA_DISPLAY_TASK_STACK_SIZE 4096U
 #define ONDA_DISPLAY_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
-#define ONDA_AUDIO_BUFFER_SAMPLES 512U
-#define ONDA_AUDIO_READ_TIMEOUT_MS 100U
 
 static const char *TAG = "ONDA";
 
@@ -46,11 +44,14 @@ typedef enum {
     ONDA_COMMAND_RESET_WIFI,
     ONDA_COMMAND_WIFI_STATE_CHANGED,
     ONDA_COMMAND_DISPLAY_FAILURE,
+    ONDA_COMMAND_RECORDER_COMPLETED,
 } onda_command_t;
 
 typedef struct {
     onda_command_t command;
     wifi_state_t wifi_state;
+    esp_err_t recorder_result;
+    size_t recording_data_bytes;
     char proof_of_possession[DEVICE_UI_PROOF_OF_POSSESSION_LENGTH + 1U];
 } onda_application_command_t;
 
@@ -60,7 +61,6 @@ typedef struct {
 
 static QueueHandle_t s_application_command_queue;
 static QueueHandle_t s_display_state_queue;
-static DMA_ATTR int16_t s_audio_buffer[ONDA_AUDIO_BUFFER_SAMPLES];
 
 static void onda_application_task(void *context);
 static void onda_display_task(void *context);
@@ -68,6 +68,9 @@ static void onda_handle_button_event(button_event_t event, void *context);
 static void onda_handle_wifi_state(wifi_state_t state,
                                    const char *proof_of_possession,
                                    void *context);
+static void onda_handle_recorder_completion(esp_err_t result,
+                                            size_t data_bytes,
+                                            void *context);
 static void onda_handle_command(onda_state_t *recording_state,
                                 wifi_state_t *network_state,
                                 char *proof_of_possession,
@@ -81,7 +84,7 @@ static void onda_stop_recording(onda_state_t *state,
 static void onda_enter_error(onda_state_t *state,
                              const char *operation,
                              esp_err_t error,
-                             bool stop_audio);
+                             bool stop_recorder);
 static esp_err_t onda_schedule_display(onda_state_t recording_state,
                                        wifi_state_t network_state,
                                        const char *proof_of_possession);
@@ -159,6 +162,26 @@ static void onda_handle_wifi_state(wifi_state_t state,
     }
 }
 
+
+static void onda_handle_recorder_completion(esp_err_t result, size_t data_bytes, void *context)
+{
+    (void)context;
+
+    if (s_application_command_queue == NULL) {
+        ESP_LOGE(TAG, "Recorder completed before application startup");
+        return;
+    }
+
+    const onda_application_command_t command = {
+        .command = ONDA_COMMAND_RECORDER_COMPLETED,
+        .recorder_result = result,
+        .recording_data_bytes = data_bytes,
+    };
+    if (xQueueSend(s_application_command_queue, &command, pdMS_TO_TICKS(100U)) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to report recorder completion");
+    }
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "Starting Onda firmware");
@@ -220,11 +243,6 @@ void app_main(void)
         if (verification_result != ESP_OK) {
             ESP_LOGW(TAG, "SD card verification failed: %s", esp_err_to_name(verification_result));
         }
-
-        const esp_err_t storage_deinit_result = storage_deinit();
-        if (storage_deinit_result != ESP_OK) {
-            ESP_LOGW(TAG, "SD card cleanup failed: %s", esp_err_to_name(storage_deinit_result));
-        }
     }
 
     const esp_err_t audio_result = audio_init();
@@ -285,21 +303,7 @@ static void onda_application_task(void *context)
 
     for (;;) {
         onda_application_command_t command;
-
-        if (recording_state == ONDA_STATE_RECORDING) {
-            size_t bytes_read = 0;
-            const esp_err_t result = audio_read(s_audio_buffer,
-                                                sizeof(s_audio_buffer),
-                                                &bytes_read,
-                                                pdMS_TO_TICKS(ONDA_AUDIO_READ_TIMEOUT_MS));
-            if (result != ESP_OK && result != ESP_ERR_TIMEOUT) {
-                onda_enter_error(&recording_state, "Recording read", result, true);
-            }
-        }
-
-        const TickType_t wait_time =
-            recording_state == ONDA_STATE_RECORDING ? 0 : portMAX_DELAY;
-        if (xQueueReceive(s_application_command_queue, &command, wait_time) == pdTRUE) {
+        if (xQueueReceive(s_application_command_queue, &command, portMAX_DELAY) == pdTRUE) {
             onda_handle_command(&recording_state,
                                 &network_state,
                                 proof_of_possession,
@@ -400,6 +404,29 @@ static void onda_handle_command(onda_state_t *recording_state,
                              *recording_state == ONDA_STATE_RECORDING);
         }
         break;
+    case ONDA_COMMAND_RECORDER_COMPLETED:
+        if (*recording_state != ONDA_STATE_RECORDING) {
+            ESP_LOGW(TAG, "Ignoring recorder completion outside RECORDING state");
+            break;
+        }
+        if (command->recorder_result != ESP_OK) {
+            onda_enter_error(recording_state,
+                             "Recording finalization",
+                             command->recorder_result,
+                             false);
+            break;
+        }
+
+        ESP_LOGI(TAG,
+                 "Recording saved: %u PCM bytes",
+                 (unsigned)command->recording_data_bytes);
+        *recording_state = ONDA_STATE_READY;
+        if (onda_schedule_display(*recording_state, *network_state, proof_of_possession) != ESP_OK) {
+            onda_enter_error(recording_state, "Ready display request", ESP_FAIL, false);
+            break;
+        }
+        ESP_LOGI(TAG, "State: %s", onda_state_name(*recording_state));
+        break;
     default:
         onda_enter_error(recording_state, "Command handling", ESP_ERR_INVALID_ARG, false);
         break;
@@ -411,7 +438,8 @@ static void onda_start_recording(onda_state_t *state,
                                  const char *proof_of_possession)
 {
     ESP_LOGI(TAG, "Transition READY -> RECORDING");
-    const esp_err_t result = audio_start();
+    const esp_err_t result =
+        audio_recorder_start(onda_handle_recorder_completion, NULL);
     if (result != ESP_OK) {
         onda_enter_error(state, "Recording start", result, false);
         return;
@@ -422,7 +450,8 @@ static void onda_start_recording(onda_state_t *state,
                                                             network_state,
                                                             proof_of_possession);
     if (display_result != ESP_OK) {
-        onda_enter_error(state, "Recording display request", display_result, true);
+        (void)audio_recorder_stop();
+        onda_enter_error(state, "Recording display request", display_result, false);
         return;
     }
     ESP_LOGI(TAG, "State: %s", onda_state_name(*state));
@@ -432,34 +461,26 @@ static void onda_stop_recording(onda_state_t *state,
                                 wifi_state_t network_state,
                                 const char *proof_of_possession)
 {
-    ESP_LOGI(TAG, "Transition RECORDING -> READY");
-    const esp_err_t result = audio_stop();
-    if (result != ESP_OK) {
-        onda_enter_error(state, "Recording stop", result, true);
-        return;
-    }
+    (void)network_state;
+    (void)proof_of_possession;
 
-    *state = ONDA_STATE_READY;
-    const esp_err_t display_result = onda_schedule_display(*state,
-                                                            network_state,
-                                                            proof_of_possession);
-    if (display_result != ESP_OK) {
-        onda_enter_error(state, "Ready display request", display_result, false);
-        return;
+    ESP_LOGI(TAG, "Finalizing recording");
+    const esp_err_t result = audio_recorder_stop();
+    if (result != ESP_OK) {
+        onda_enter_error(state, "Recording stop", result, false);
     }
-    ESP_LOGI(TAG, "State: %s", onda_state_name(*state));
 }
 
 static void onda_enter_error(onda_state_t *state,
                              const char *operation,
                              esp_err_t error,
-                             bool stop_audio)
+                             bool stop_recorder)
 {
     ESP_LOGE(TAG, "%s failed: %s", operation, esp_err_to_name(error));
-    if (stop_audio) {
-        const esp_err_t stop_result = audio_stop();
+    if (stop_recorder) {
+        const esp_err_t stop_result = audio_recorder_stop();
         if (stop_result != ESP_OK) {
-            ESP_LOGE(TAG, "Audio cleanup failed: %s", esp_err_to_name(stop_result));
+            ESP_LOGE(TAG, "Recorder cleanup request failed: %s", esp_err_to_name(stop_result));
         }
     }
 

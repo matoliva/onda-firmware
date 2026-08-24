@@ -1,11 +1,15 @@
 #ifndef ONDA_STORAGE_H
 #define ONDA_STORAGE_H
 
+#include <stddef.h>
+
 #include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef struct storage_file storage_file_t;
 
 /** Mount the onboard microSD card at /sdcard. */
 esp_err_t storage_init(void);
@@ -15,6 +19,30 @@ esp_err_t storage_init(void);
  * The caller must successfully call storage_init() first.
  */
 esp_err_t storage_verify(void);
+
+/** Open one Onda-owned file for exclusive binary writing. */
+esp_err_t storage_file_create(const char *path, storage_file_t **file);
+
+/** Write an exact bounded byte range to an open storage file. */
+esp_err_t storage_file_write(storage_file_t *file, const void *data, size_t size);
+
+/** Seek an open storage file to an absolute byte offset. */
+esp_err_t storage_file_seek(storage_file_t *file, long offset);
+
+/** Flush an open storage file's buffered data to the SD card. */
+esp_err_t storage_file_sync(storage_file_t *file);
+
+/** Close an open storage file and release its single-file slot. */
+esp_err_t storage_file_close(storage_file_t *file);
+
+/**
+ * Replace an Onda-owned destination with a closed source file.
+ * If a destination exists, it is restored if the replacement rename fails.
+ */
+esp_err_t storage_file_replace(const char *source, const char *destination);
+
+/** Remove an Onda-owned file that is not open. */
+esp_err_t storage_file_remove(const char *path);
 
 /** Unmount the mounted microSD card and release its filesystem resources. */
 esp_err_t storage_deinit(void);
