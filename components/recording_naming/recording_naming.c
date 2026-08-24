@@ -33,7 +33,7 @@ esp_err_t recording_naming_make_path(time_t utc_time,
                            (unsigned)ordinal);
     } else {
         struct tm timestamp;
-        if (gmtime_r(&utc_time, &timestamp) == NULL) {
+        if (localtime_r(&utc_time, &timestamp) == NULL) {
             return ESP_FAIL;
         }
 
