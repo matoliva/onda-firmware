@@ -77,11 +77,6 @@ static void canvas_draw_centered_text(const char *text,
                                       uint8_t scale,
                                       uint8_t color);
 static void canvas_fill_rect(uint16_t x, uint16_t y, uint16_t width, uint16_t height, uint8_t color);
-static void canvas_draw_rect(uint16_t x,
-                             uint16_t y,
-                             uint16_t width,
-                             uint16_t height,
-                             uint8_t color);
 static void canvas_draw_line(uint16_t start_x,
                              uint16_t start_y,
                              uint16_t end_x,
@@ -92,6 +87,7 @@ static void canvas_draw_wifi_arc(uint16_t center_x,
                                  uint16_t half_width,
                                  uint8_t color);
 static void canvas_draw_wifi_icon(display_wifi_status_t status);
+static void canvas_draw_storage_icon(display_storage_status_t status);
 static void canvas_draw_battery_icon(display_battery_status_t status);
 static uint8_t display_color_to_epd(display_color_t color);
 
@@ -147,8 +143,9 @@ esp_err_t display_show(const display_screen_t *screen)
     canvas_draw_char(17, 10, 'N', 1, EPD_COLOR_BLACK);
     canvas_draw_char(24, 10, 'D', 1, EPD_COLOR_BLACK);
     canvas_draw_char(31, 10, 'A', 1, EPD_COLOR_BLACK);
-    canvas_draw_wifi_icon(screen->wifi_status);
+    canvas_draw_storage_icon(screen->storage_status);
     canvas_draw_battery_icon(screen->battery_status);
+    canvas_draw_wifi_icon(screen->wifi_status);
 
     if (screen->show_recording_indicator) {
         canvas_fill_rect(20, 79, 8, 8, EPD_COLOR_RED);
@@ -506,26 +503,6 @@ static void canvas_fill_rect(uint16_t x, uint16_t y, uint16_t width, uint16_t he
     }
 }
 
-static void canvas_draw_rect(uint16_t x,
-                             uint16_t y,
-                             uint16_t width,
-                             uint16_t height,
-                             uint8_t color)
-{
-    if (width == 0U || height == 0U) {
-        return;
-    }
-
-    for (uint16_t column = 0; column < width; ++column) {
-        canvas_set_pixel(x + column, y, color);
-        canvas_set_pixel(x + column, y + height - 1U, color);
-    }
-    for (uint16_t row = 0; row < height; ++row) {
-        canvas_set_pixel(x, y + row, color);
-        canvas_set_pixel(x + width - 1U, y + row, color);
-    }
-}
-
 static void canvas_draw_line(uint16_t start_x,
                              uint16_t start_y,
                              uint16_t end_x,
@@ -580,20 +557,38 @@ static void canvas_draw_wifi_arc(uint16_t center_x,
 
 static void canvas_draw_wifi_icon(display_wifi_status_t status)
 {
-    const uint16_t center_x = 161U;
+    const uint16_t center_x = 190U;
 
     canvas_draw_wifi_arc(center_x, 9U, 7U, EPD_COLOR_BLACK);
     canvas_draw_wifi_arc(center_x, 14U, 4U, EPD_COLOR_BLACK);
     canvas_fill_rect(center_x - 1U, 19U, 3U, 3U, EPD_COLOR_BLACK);
 
     if (status == DISPLAY_WIFI_OFFLINE) {
-        canvas_draw_line(153U, 9U, 169U, 22U, EPD_COLOR_BLACK);
+        canvas_draw_line(182U, 9U, 198U, 22U, EPD_COLOR_BLACK);
+    }
+}
+
+static void canvas_draw_storage_icon(display_storage_status_t status)
+{
+    const uint16_t x = 132U;
+    const uint16_t y = 10U;
+    canvas_draw_char(x, y, 'S', 1U, EPD_COLOR_BLACK);
+    canvas_draw_char(x + 7U, y, 'D', 1U, EPD_COLOR_BLACK);
+
+    switch (status) {
+    case DISPLAY_STORAGE_AVAILABLE:
+        break;
+    case DISPLAY_STORAGE_UNAVAILABLE:
+    case DISPLAY_STORAGE_ERROR:
+    default:
+        canvas_draw_line(x - 1U, y - 1U, x + 15U, y + 12U, EPD_COLOR_BLACK);
+        break;
     }
 }
 
 static void canvas_draw_battery_icon(display_battery_status_t status)
 {
-    const uint16_t x = 176U;
+    const uint16_t x = 153U;
     const uint16_t y = 10U;
     const uint8_t color = status == DISPLAY_BATTERY_CRITICAL ? EPD_COLOR_RED : EPD_COLOR_BLACK;
     uint16_t fill_width = 0U;
@@ -616,12 +611,15 @@ static void canvas_draw_battery_icon(display_battery_status_t status)
         break;
     }
 
-    canvas_draw_rect(x, y, 16U, 10U, color);
+    canvas_draw_line(x, y, x + 15U, y, color);
+    canvas_draw_line(x, y, x, y + 9U, color);
+    canvas_draw_line(x + 15U, y, x + 15U, y + 9U, color);
+    canvas_draw_line(x, y + 9U, x + 15U, y + 9U, color);
     canvas_fill_rect(x + 16U, y + 3U, 2U, 4U, color);
     if (fill_width > 0U) {
         canvas_fill_rect(x + 2U, y + 2U, fill_width, 6U, color);
     } else {
-        canvas_draw_char(x + 5U, y - 1U, '?', 1, color);
+        canvas_draw_char(x + 5U, y - 1U, '?', 1U, color);
     }
 }
 
