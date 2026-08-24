@@ -19,6 +19,7 @@
 #include "audio_recorder.h"
 #include "buttons.h"
 #include "device_ui.h"
+#include "onda_time.h"
 #include "recording_naming.h"
 #include "storage.h"
 #include "wifi.h"
@@ -241,6 +242,10 @@ void app_main(void)
         ESP_LOGE(TAG, "Button input initialisation failed: %s", esp_err_to_name(buttons_result));
         return;
     }
+    const esp_err_t time_result = onda_time_init();
+    if (time_result != ESP_OK) {
+        ESP_LOGE(TAG, "Time service unavailable: %s", esp_err_to_name(time_result));
+    }
     const esp_err_t wifi_result = wifi_start(onda_handle_wifi_state, NULL);
     if (wifi_result != ESP_OK) {
         ESP_LOGE(TAG, "Wi-Fi unavailable: %s", esp_err_to_name(wifi_result));
@@ -338,6 +343,12 @@ static void onda_handle_command(onda_application_model_t *model, const onda_appl
                    sizeof(model->proof_of_possession));
         }
         ESP_LOGI(TAG, "Wi-Fi state: %s", onda_wifi_state_name(model->network_state));
+        if (model->network_state == WIFI_STATE_CONNECTED) {
+            const esp_err_t time_result = onda_time_start_sync();
+            if (time_result != ESP_OK) {
+                ESP_LOGW(TAG, "Time synchronization unavailable: %s", esp_err_to_name(time_result));
+            }
+        }
         (void)onda_schedule_display(model);
         break;
     case ONDA_COMMAND_DISPLAY_FAILURE:
@@ -485,7 +496,7 @@ static esp_err_t onda_prepare_recording_config(audio_recorder_config_t *config)
     if (config == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    const time_t now = time(NULL);
+    const time_t now = onda_time_is_synced() ? time(NULL) : (time_t)0;
     const uint32_t first_ordinal = recording_naming_time_is_reliable(now) ? 0U : 1U;
     for (uint32_t ordinal = first_ordinal; ordinal <= RECORDING_NAMING_MAX_ORDINAL; ++ordinal) {
         const esp_err_t name_result = recording_naming_make_path(now, ordinal, config->final_path,
