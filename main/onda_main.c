@@ -21,6 +21,7 @@
 #include "device_ui.h"
 #include "onda_api.h"
 #include "onda_time.h"
+#include "recording_metadata.h"
 #include "recording_naming.h"
 #include "storage.h"
 #include "wifi.h"
@@ -72,6 +73,7 @@ typedef struct {
     char proof_of_possession[DEVICE_UI_PROOF_OF_POSSESSION_LENGTH + 1U];
     char saved_duration[DEVICE_UI_SAVED_DURATION_LENGTH + 1U];
     char saved_filename[DEVICE_UI_SAVED_FILENAME_LENGTH + 1U];
+    recording_metadata_session_t pending_metadata;
 } onda_application_model_t;
 
 typedef struct {
@@ -212,7 +214,10 @@ void app_main(void)
     }
 
     const esp_err_t storage_result = storage_init();
-    if (storage_result == ESP_OK && storage_verify() == ESP_OK) {
+    const esp_err_t storage_verify_result = storage_result == ESP_OK ? storage_verify() : storage_result;
+    const esp_err_t metadata_recovery_result = storage_verify_result == ESP_OK ?
+                                                   recording_metadata_recover() : storage_verify_result;
+    if (metadata_recovery_result == ESP_OK) {
         s_initial_storage_status = DEVICE_UI_STORAGE_AVAILABLE;
     } else {
         ESP_LOGW(TAG, "SD card unavailable during startup");
@@ -377,6 +382,10 @@ static void onda_handle_command(onda_application_model_t *model, const onda_appl
             break;
         }
         if (command->recorder_completion.kind != AUDIO_RECORDER_COMPLETION_SUCCESS) {
+            if (model->pending_metadata.seed_path[0] != '\0') {
+                (void)recording_metadata_cancel(&model->pending_metadata);
+                memset(&model->pending_metadata, 0, sizeof(model->pending_metadata));
+            }
             const onda_state_t error_state =
                 command->recorder_completion.kind == AUDIO_RECORDER_COMPLETION_AUDIO_ERROR
                     ? ONDA_STATE_AUDIO_ERROR
@@ -388,6 +397,15 @@ static void onda_handle_command(onda_application_model_t *model, const onda_appl
                              command->recorder_completion.error, false);
             break;
         }
+        const esp_err_t metadata_result = recording_metadata_finalize(
+            &model->pending_metadata, command->recorder_completion.data_bytes);
+        if (metadata_result != ESP_OK) {
+            model->storage_status = DEVICE_UI_STORAGE_ERROR;
+            onda_enter_error(model, ONDA_STATE_STORAGE_ERROR, "Recording metadata finalization",
+                             metadata_result, false);
+            break;
+        }
+        memset(&model->pending_metadata, 0, sizeof(model->pending_metadata));
         if (recording_naming_format_duration(command->recorder_completion.data_bytes,
                                              model->saved_duration,
                                              sizeof(model->saved_duration)) != ESP_OK) {
@@ -434,9 +452,19 @@ static void onda_start_recording(onda_application_model_t *model)
                          preparation_result, false);
         return;
     }
+    const time_t metadata_time = onda_time_is_synced() ? time(NULL) : (time_t)0;
+    const esp_err_t metadata_result = recording_metadata_prepare(config.final_path, metadata_time,
+                                                                  &model->pending_metadata);
+    if (metadata_result != ESP_OK) {
+        model->storage_status = DEVICE_UI_STORAGE_ERROR;
+        onda_enter_error(model, ONDA_STATE_STORAGE_ERROR, "Recording metadata staging", metadata_result, false);
+        return;
+    }
     config.completion_callback = onda_handle_recorder_completion;
     const esp_err_t result = audio_recorder_start(&config);
     if (result != ESP_OK) {
+        (void)recording_metadata_cancel(&model->pending_metadata);
+        memset(&model->pending_metadata, 0, sizeof(model->pending_metadata));
         onda_enter_error(model, ONDA_STATE_ERROR, "Recording start", result, false);
         return;
     }
@@ -472,9 +500,10 @@ static void onda_retry_storage(onda_application_model_t *model)
     }
     const esp_err_t init_result = storage_init();
     const esp_err_t verify_result = init_result == ESP_OK ? storage_verify() : init_result;
-    if (verify_result != ESP_OK) {
+    const esp_err_t recovery_result = verify_result == ESP_OK ? recording_metadata_recover() : verify_result;
+    if (recovery_result != ESP_OK) {
         model->storage_status = DEVICE_UI_STORAGE_UNAVAILABLE;
-        ESP_LOGW("ONDA_STORAGE", "SD retry failed: %s", esp_err_to_name(verify_result));
+        ESP_LOGW("ONDA_STORAGE", "SD retry failed: %s", esp_err_to_name(recovery_result));
         (void)onda_schedule_display(model);
         return;
     }

@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -330,6 +331,111 @@ esp_err_t storage_file_close(storage_file_t *file)
     FILE *handle = file->handle;
     file->handle = NULL;
     return storage_close_handle(handle, "Recording file");
+}
+
+
+esp_err_t storage_file_exists(const char *path, bool *exists)
+{
+    if (path == NULL || exists == NULL || s_open_file.handle != NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const esp_err_t status_result = storage_check_mounted();
+    if (status_result != ESP_OK) {
+        return status_result;
+    }
+    struct stat status;
+    if (stat(path, &status) == 0) {
+        *exists = true;
+        return ESP_OK;
+    }
+    if (errno == ENOENT) {
+        *exists = false;
+        return ESP_OK;
+    }
+    ESP_LOGE(TAG, "Failed to inspect %s: %s", path, strerror(errno));
+    return ESP_FAIL;
+}
+
+esp_err_t storage_file_read(const char *path, void *buffer, size_t buffer_size, size_t *bytes_read)
+{
+    if (path == NULL || buffer == NULL || buffer_size == 0U || bytes_read == NULL ||
+        s_open_file.handle != NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const esp_err_t status_result = storage_check_mounted();
+    if (status_result != ESP_OK) {
+        return status_result;
+    }
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        ESP_LOGE(TAG, "Failed to open %s: %s", path, strerror(errno));
+        return ESP_FAIL;
+    }
+    const size_t count = fread(buffer, 1U, buffer_size, file);
+    const bool failed = ferror(file);
+    const esp_err_t close_result = storage_close_handle(file, "File read");
+    if (failed || close_result != ESP_OK) {
+        return failed ? ESP_FAIL : close_result;
+    }
+    *bytes_read = count;
+    return ESP_OK;
+}
+
+esp_err_t storage_recordings_iterate(storage_recording_entry_callback_t callback, void *context)
+{
+    if (callback == NULL || s_open_file.handle != NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const esp_err_t status_result = storage_check_mounted();
+    if (status_result != ESP_OK) {
+        return status_result;
+    }
+    DIR *root = opendir(ONDA_STORAGE_RECORDINGS_PATH);
+    if (root == NULL) {
+        return errno == ENOENT ? ESP_OK : ESP_FAIL;
+    }
+    esp_err_t result = ESP_OK;
+    struct dirent *directory;
+    while ((directory = readdir(root)) != NULL && result == ESP_OK) {
+        if (directory->d_name[0] == '.') {
+            continue;
+        }
+        char directory_path[STORAGE_RECORDING_PATH_MAX];
+        const int directory_written = snprintf(directory_path, sizeof(directory_path), "%s/%s",
+                                               ONDA_STORAGE_RECORDINGS_PATH, directory->d_name);
+        if (directory_written < 0 || (size_t)directory_written >= sizeof(directory_path)) {
+            result = ESP_ERR_INVALID_SIZE;
+            break;
+        }
+        struct stat directory_status;
+        if (stat(directory_path, &directory_status) != 0 || !S_ISDIR(directory_status.st_mode)) {
+            continue;
+        }
+        DIR *child = opendir(directory_path);
+        if (child == NULL) {
+            result = ESP_FAIL;
+            break;
+        }
+        struct dirent *entry;
+        while ((entry = readdir(child)) != NULL && result == ESP_OK) {
+            if (entry->d_name[0] == '.') {
+                continue;
+            }
+            char path[STORAGE_RECORDING_PATH_MAX + 16U];
+            const int path_written = snprintf(path, sizeof(path), "%s/%s", directory_path, entry->d_name);
+            if (path_written < 0 || (size_t)path_written >= sizeof(path)) {
+                result = ESP_ERR_INVALID_SIZE;
+                break;
+            }
+            struct stat entry_status;
+            if (stat(path, &entry_status) == 0 && S_ISREG(entry_status.st_mode)) {
+                result = callback(path, context);
+            }
+        }
+        (void)closedir(child);
+    }
+    (void)closedir(root);
+    return result;
 }
 
 esp_err_t storage_file_get_size(const char *path, size_t *size)
