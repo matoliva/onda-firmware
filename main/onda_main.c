@@ -19,6 +19,7 @@
 #include "audio_recorder.h"
 #include "buttons.h"
 #include "device_ui.h"
+#include "onda_api.h"
 #include "onda_time.h"
 #include "recording_naming.h"
 #include "storage.h"
@@ -67,6 +68,7 @@ typedef struct {
     onda_state_t recording_state;
     wifi_state_t network_state;
     device_ui_storage_status_t storage_status;
+    bool api_identity_check_started;
     char proof_of_possession[DEVICE_UI_PROOF_OF_POSSESSION_LENGTH + 1U];
     char saved_duration[DEVICE_UI_SAVED_DURATION_LENGTH + 1U];
     char saved_filename[DEVICE_UI_SAVED_FILENAME_LENGTH + 1U];
@@ -246,6 +248,10 @@ void app_main(void)
     if (time_result != ESP_OK) {
         ESP_LOGE(TAG, "Time service unavailable: %s", esp_err_to_name(time_result));
     }
+    const esp_err_t api_result = onda_api_init();
+    if (api_result != ESP_OK) {
+        ESP_LOGE(TAG, "Device API unavailable: %s", esp_err_to_name(api_result));
+    }
     const esp_err_t wifi_result = wifi_start(onda_handle_wifi_state, NULL);
     if (wifi_result != ESP_OK) {
         ESP_LOGE(TAG, "Wi-Fi unavailable: %s", esp_err_to_name(wifi_result));
@@ -347,6 +353,13 @@ static void onda_handle_command(onda_application_model_t *model, const onda_appl
             const esp_err_t time_result = onda_time_start_sync();
             if (time_result != ESP_OK) {
                 ESP_LOGW(TAG, "Time synchronization unavailable: %s", esp_err_to_name(time_result));
+            }
+            if (!model->api_identity_check_started) {
+                model->api_identity_check_started = true;
+                const esp_err_t api_result = onda_api_get_device_identity_async();
+                if (api_result != ESP_OK) {
+                    ESP_LOGW(TAG, "Device identity check unavailable: %s", esp_err_to_name(api_result));
+                }
             }
         }
         (void)onda_schedule_display(model);

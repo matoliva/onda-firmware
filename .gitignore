@@ -6,5 +6,9 @@
 # Managed component downloads are reproducible from their manifests and lockfile
 /managed_components/
 
+# Local development credentials for the Onda API. Copy the adjacent example
+# before building against a local BFF; never commit the copied file.
+/components/onda_api/private_include/onda_api_config_local.h
+
 # macOS
 .DS_Store

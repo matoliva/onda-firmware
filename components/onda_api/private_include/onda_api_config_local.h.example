@@ -1,0 +1,8 @@
+#ifndef ONDA_API_CONFIG_LOCAL_H
+#define ONDA_API_CONFIG_LOCAL_H
+
+/* Copy this file to onda_api_config_local.h and set development-only values. */
+#define ONDA_API_LOCAL_BASE_URL "http://192.168.0.234:3000"
+#define ONDA_API_LOCAL_DEVICE_TOKEN "<device-token>"
+
+#endif
