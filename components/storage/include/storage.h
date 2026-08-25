@@ -1,6 +1,7 @@
 #ifndef ONDA_STORAGE_H
 #define ONDA_STORAGE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "esp_err.h"
@@ -66,6 +67,17 @@ esp_err_t storage_file_remove(const char *path);
 
 /** Unmount the mounted microSD card and release its filesystem resources. */
 esp_err_t storage_deinit(void);
+
+/** Return whether a closed Onda-owned path exists. */
+esp_err_t storage_file_exists(const char *path, bool *exists);
+
+/** Read a closed Onda-owned file into a caller-owned bounded buffer. */
+esp_err_t storage_file_read(const char *path, void *buffer, size_t buffer_size, size_t *bytes_read);
+
+typedef esp_err_t (*storage_recording_entry_callback_t)(const char *path, void *context);
+
+/** Enumerate regular files one directory below /sdcard/recordings. */
+esp_err_t storage_recordings_iterate(storage_recording_entry_callback_t callback, void *context);
 
 #ifdef __cplusplus
 }
