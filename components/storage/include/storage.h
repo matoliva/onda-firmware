@@ -26,11 +26,20 @@ esp_err_t storage_verify(void);
 /** Open one Onda-owned file for binary writing. */
 esp_err_t storage_file_create(const char *path, storage_file_t **file);
 
+/** Open one closed Onda-owned file for bounded sequential binary reading. */
+esp_err_t storage_file_open_read(const char *path, storage_file_t **file);
+
 /** Open a new Onda-owned file without overwriting an existing file. */
 esp_err_t storage_file_create_exclusive(const char *path, storage_file_t **file);
 
 /** Write an exact bounded byte range to an open storage file. */
 esp_err_t storage_file_write(storage_file_t *file, const void *data, size_t size);
+
+/** Read at most buffer_size bytes from an open sequential reader; zero means EOF. */
+esp_err_t storage_file_read_next(storage_file_t *file,
+                                 void *buffer,
+                                 size_t buffer_size,
+                                 size_t *bytes_read);
 
 /** Seek an open storage file to an absolute byte offset. */
 esp_err_t storage_file_seek(storage_file_t *file, long offset);

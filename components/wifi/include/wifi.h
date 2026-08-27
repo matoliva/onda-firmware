@@ -32,6 +32,9 @@ esp_err_t wifi_start(wifi_state_callback_t callback, void *context);
  */
 esp_err_t wifi_request_reprovision(void);
 
+/** Stop Wi-Fi/BLE provisioning activity before entering deep sleep. */
+esp_err_t wifi_stop(void);
+
 #ifdef __cplusplus
 }
 #endif

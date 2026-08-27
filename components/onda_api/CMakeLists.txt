@@ -1,6 +1,6 @@
 idf_component_register(
     SRCS "onda_api.c"
-    REQUIRES esp_http_client json
+    REQUIRES esp_http_client json mbedtls recording_metadata storage
     PRIV_REQUIRES freertos
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "private_include")

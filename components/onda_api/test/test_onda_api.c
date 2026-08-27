@@ -63,3 +63,22 @@ TEST_CASE("device API maps HTTP outcomes to independent authentication states", 
     TEST_ASSERT_EQUAL(ONDA_API_ERROR,
                       onda_api_resolve_state(ESP_ERR_TIMEOUT, 0, false));
 }
+
+TEST_CASE("device API accepts only a complete BFF sync confirmation", "[onda_api]")
+{
+    static const char response[] =
+        "{\"recordingId\":\"rec_00112233445566778899aabbccddeeff\","
+        "\"meetingId\":\"mtg_123\",\"status\":\"uploaded\",\"created\":false,"
+        "\"syncedAt\":\"2026-08-25T03:02:00.000Z\"}";
+    static const char incomplete[] = "{\"recordingId\":\"rec_x\"}";
+    onda_api_sync_result_t result = {0};
+
+    TEST_ASSERT_EQUAL(ESP_OK,
+                      onda_api_parse_sync_success(response, strlen(response),
+                                                  "rec_00112233445566778899aabbccddeeff", &result));
+    TEST_ASSERT_EQUAL_STRING("mtg_123", result.meeting_id);
+    TEST_ASSERT_EQUAL_STRING("2026-08-25T03:02:00.000Z", result.synced_at);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE,
+                      onda_api_parse_sync_success(incomplete, strlen(incomplete),
+                                                  "rec_00112233445566778899aabbccddeeff", &result));
+}

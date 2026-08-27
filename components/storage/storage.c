@@ -241,6 +241,30 @@ esp_err_t storage_file_create(const char *path, storage_file_t **file)
     return ESP_OK;
 }
 
+esp_err_t storage_file_open_read(const char *path, storage_file_t **file)
+{
+    if (path == NULL || file == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const esp_err_t status_result = storage_check_mounted();
+    if (status_result != ESP_OK) {
+        return status_result;
+    }
+    if (s_open_file.handle != NULL) {
+        ESP_LOGE(TAG, "A storage file is already open");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    FILE *handle = fopen(path, "rb");
+    if (handle == NULL) {
+        ESP_LOGE(TAG, "Failed to open %s: %s", path, strerror(errno));
+        return ESP_FAIL;
+    }
+    s_open_file.handle = handle;
+    *file = &s_open_file;
+    return ESP_OK;
+}
+
 esp_err_t storage_file_create_exclusive(const char *path, storage_file_t **file)
 {
     if (path == NULL || file == NULL) {
@@ -292,6 +316,24 @@ esp_err_t storage_file_write(storage_file_t *file, const void *data, size_t size
 
     ESP_LOGE(TAG, "Failed to write file data: %s", strerror(errno));
     return ESP_FAIL;
+}
+
+esp_err_t storage_file_read_next(storage_file_t *file,
+                                 void *buffer,
+                                 size_t buffer_size,
+                                 size_t *bytes_read)
+{
+    if (file == NULL || buffer == NULL || buffer_size == 0U || bytes_read == NULL ||
+        file != &s_open_file || file->handle == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const size_t count = fread(buffer, 1U, buffer_size, file->handle);
+    if (ferror(file->handle)) {
+        ESP_LOGE(TAG, "Failed to read file data: %s", strerror(errno));
+        return ESP_FAIL;
+    }
+    *bytes_read = count;
+    return ESP_OK;
 }
 
 esp_err_t storage_file_seek(storage_file_t *file, long offset)

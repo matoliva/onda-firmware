@@ -215,6 +215,31 @@ esp_err_t wifi_request_reprovision(void)
     return wifi_start_provisioning();
 }
 
+esp_err_t wifi_stop(void)
+{
+    if (!s_started) {
+        return ESP_OK;
+    }
+    if (s_retry_timer != NULL) {
+        (void)esp_timer_stop(s_retry_timer);
+    }
+    if (s_provisioning_active) {
+        (void)wifi_prov_mgr_stop_provisioning();
+        wifi_prov_mgr_deinit();
+        s_provisioning_active = false;
+    }
+    if (s_station_started) {
+        const esp_err_t result = esp_wifi_stop();
+        if (result != ESP_OK && result != ESP_ERR_WIFI_NOT_STARTED) {
+            wifi_report_error("Wi-Fi station stop", result);
+            return result;
+        }
+        s_station_started = false;
+    }
+    ESP_LOGI(TAG, "Wi-Fi stopped for sleep");
+    return ESP_OK;
+}
+
 static esp_err_t wifi_start_provisioning(void)
 {
     esp_err_t result = wifi_load_or_create_pop();
