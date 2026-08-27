@@ -71,6 +71,29 @@ TEST_CASE("device UI maps all storage indicator states", "[device_ui]")
     }
 }
 
+TEST_CASE("device UI maps all battery indicator states", "[device_ui]")
+{
+    const struct {
+        device_ui_battery_status_t input;
+        display_battery_status_t output;
+    } cases[] = {
+        {DEVICE_UI_BATTERY_UNKNOWN, DISPLAY_BATTERY_UNKNOWN},
+        {DEVICE_UI_BATTERY_HIGH, DISPLAY_BATTERY_HIGH},
+        {DEVICE_UI_BATTERY_MEDIUM, DISPLAY_BATTERY_MEDIUM},
+        {DEVICE_UI_BATTERY_LOW, DISPLAY_BATTERY_LOW},
+        {DEVICE_UI_BATTERY_CRITICAL, DISPLAY_BATTERY_CRITICAL},
+    };
+
+    for (size_t index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        device_ui_state_t state = make_state(DEVICE_UI_PRIMARY_READY);
+        display_screen_t screen;
+        state.battery_status = cases[index].input;
+
+        TEST_ASSERT_EQUAL(ESP_OK, device_ui_describe(&state, &screen));
+        TEST_ASSERT_EQUAL(cases[index].output, screen.battery_status);
+    }
+}
+
 TEST_CASE("device UI refreshes only primary state transitions", "[device_ui]")
 {
     device_ui_state_t previous = make_state(DEVICE_UI_PRIMARY_READY);
@@ -90,6 +113,19 @@ TEST_CASE("device UI refreshes only primary state transitions", "[device_ui]")
     previous.primary_state = DEVICE_UI_PRIMARY_READY;
     TEST_ASSERT_TRUE(device_ui_should_refresh(&previous, &next));
     TEST_ASSERT_FALSE(device_ui_should_refresh(&previous, NULL));
+}
+
+TEST_CASE("device UI refreshes a stable battery transition outside recording", "[device_ui]")
+{
+    device_ui_state_t previous = make_state(DEVICE_UI_PRIMARY_READY);
+    device_ui_state_t next = previous;
+
+    next.battery_status = DEVICE_UI_BATTERY_LOW;
+    TEST_ASSERT_TRUE(device_ui_should_refresh(&previous, &next));
+
+    previous.primary_state = DEVICE_UI_PRIMARY_RECORDING;
+    next.primary_state = DEVICE_UI_PRIMARY_RECORDING;
+    TEST_ASSERT_FALSE(device_ui_should_refresh(&previous, &next));
 }
 
 TEST_CASE("Saved UI requires duration and filename", "[device_ui]")

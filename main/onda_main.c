@@ -17,6 +17,7 @@
 
 #include "audio.h"
 #include "audio_recorder.h"
+#include "battery.h"
 #include "buttons.h"
 #include "device_ui.h"
 #include "onda_api.h"
@@ -39,6 +40,7 @@
 #define ONDA_DISPLAY_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
 #define ONDA_SAVED_SCREEN_TIMEOUT_MS 20000U
 #define ONDA_SYNC_SCREEN_TIMEOUT_MS 3000U
+#define ONDA_BATTERY_SAMPLE_INTERVAL_MS 60000U
 
 static const char *TAG = "ONDA";
 
@@ -70,6 +72,7 @@ typedef enum {
     ONDA_COMMAND_SYNC_COMPLETED,
     ONDA_COMMAND_ENTER_SLEEP,
     ONDA_COMMAND_POWER_OFF,
+    ONDA_COMMAND_BATTERY_SAMPLE,
 } onda_command_t;
 
 typedef struct {
@@ -84,6 +87,7 @@ typedef struct {
     onda_state_t recording_state;
     wifi_state_t network_state;
     device_ui_storage_status_t storage_status;
+    battery_status_t battery_status;
     bool api_identity_check_started;
     char proof_of_possession[DEVICE_UI_PROOF_OF_POSSESSION_LENGTH + 1U];
     char saved_duration[DEVICE_UI_SAVED_DURATION_LENGTH + 1U];
@@ -101,12 +105,16 @@ static QueueHandle_t s_application_command_queue;
 static QueueHandle_t s_display_state_queue;
 static TimerHandle_t s_saved_timer;
 static StaticTimer_t s_saved_timer_buffer;
+static TimerHandle_t s_battery_timer;
+static StaticTimer_t s_battery_timer_buffer;
 static device_ui_storage_status_t s_initial_storage_status = DEVICE_UI_STORAGE_UNAVAILABLE;
 static bool s_initial_audio_ready;
+static battery_status_t s_initial_battery_status = BATTERY_STATUS_UNKNOWN;
 
 static void onda_application_task(void *context);
 static void onda_display_task(void *context);
 static void onda_saved_timer_callback(TimerHandle_t timer);
+static void onda_battery_timer_callback(TimerHandle_t timer);
 static void onda_handle_button_event(button_event_t event, void *context);
 static void onda_handle_wifi_state(wifi_state_t state, const char *proof_of_possession, void *context);
 static void onda_handle_recorder_completion(const audio_recorder_completion_t *completion, void *context);
@@ -120,6 +128,7 @@ static void onda_show_sync_result(onda_application_model_t *model,
                                   size_t uploaded_count,
                                   size_t pending_count);
 static void onda_retry_storage(onda_application_model_t *model);
+static void onda_sample_battery(onda_application_model_t *model);
 static void onda_enter_sleep(onda_application_model_t *model, bool release_battery_latch);
 static void onda_enter_error(onda_application_model_t *model,
                              onda_state_t state,
@@ -131,6 +140,7 @@ static esp_err_t onda_schedule_display(const onda_application_model_t *model);
 static esp_err_t onda_render_display(const device_ui_state_t *state);
 static device_ui_primary_state_t onda_select_ui_primary_state(const onda_application_model_t *model);
 static device_ui_wifi_status_t onda_select_ui_wifi_status(wifi_state_t state);
+static device_ui_battery_status_t onda_select_ui_battery_status(battery_status_t status);
 static const char *onda_state_name(onda_state_t state);
 static const char *onda_wifi_state_name(wifi_state_t state);
 
@@ -232,6 +242,18 @@ static void onda_saved_timer_callback(TimerHandle_t timer)
     }
 }
 
+static void onda_battery_timer_callback(TimerHandle_t timer)
+{
+    (void)timer;
+    if (s_application_command_queue == NULL) {
+        return;
+    }
+    const onda_application_command_t command = {.command = ONDA_COMMAND_BATTERY_SAMPLE};
+    if (xQueueSend(s_application_command_queue, &command, 0) != pdPASS) {
+        ESP_LOGW(TAG, "Skipping battery sample because the application queue is full");
+    }
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "Starting Onda firmware");
@@ -265,6 +287,20 @@ void app_main(void)
         return;
     }
 
+    const esp_err_t battery_init_result = battery_init();
+    if (battery_init_result != ESP_OK) {
+        ESP_LOGW(TAG, "Battery measurement unavailable: %s", esp_err_to_name(battery_init_result));
+    } else {
+        battery_reading_t initial_battery_reading = {0};
+        const esp_err_t battery_sample_result = battery_sample(&initial_battery_reading);
+        if (battery_sample_result != ESP_OK) {
+            ESP_LOGW(TAG, "Initial battery measurement unavailable: %s",
+                     esp_err_to_name(battery_sample_result));
+        } else {
+            s_initial_battery_status = initial_battery_reading.status;
+        }
+    }
+
     const esp_err_t storage_result = storage_init();
     const esp_err_t storage_verify_result = storage_result == ESP_OK ? storage_verify() : storage_result;
     const esp_err_t metadata_recovery_result = storage_verify_result == ESP_OK ?
@@ -285,7 +321,11 @@ void app_main(void)
     s_display_state_queue = xQueueCreate(ONDA_DISPLAY_STATE_QUEUE_LENGTH, sizeof(onda_display_request_t));
     s_saved_timer = xTimerCreateStatic("onda_saved", pdMS_TO_TICKS(ONDA_SAVED_SCREEN_TIMEOUT_MS),
                                        pdFALSE, NULL, onda_saved_timer_callback, &s_saved_timer_buffer);
-    if (s_application_command_queue == NULL || s_display_state_queue == NULL || s_saved_timer == NULL) {
+    s_battery_timer = xTimerCreateStatic("onda_battery",
+                                         pdMS_TO_TICKS(ONDA_BATTERY_SAMPLE_INTERVAL_MS), pdTRUE,
+                                         NULL, onda_battery_timer_callback, &s_battery_timer_buffer);
+    if (s_application_command_queue == NULL || s_display_state_queue == NULL || s_saved_timer == NULL ||
+        s_battery_timer == NULL) {
         ESP_LOGE(TAG, "Failed to create application resources");
         return;
     }
@@ -334,7 +374,11 @@ static void onda_application_task(void *context)
                                                                                        ONDA_STATE_STORAGE_ERROR,
         .network_state = WIFI_STATE_UNCONFIGURED,
         .storage_status = s_initial_storage_status,
+        .battery_status = s_initial_battery_status,
     };
+    if (xTimerStart(s_battery_timer, 0) != pdPASS) {
+        ESP_LOGW(TAG, "Battery sampling timer did not start");
+    }
     if (model.recording_state != ONDA_STATE_READY) {
         (void)onda_schedule_display(&model);
     }
@@ -411,6 +455,9 @@ static void onda_handle_command(onda_application_model_t *model, const onda_appl
         break;
     case ONDA_COMMAND_POWER_OFF:
         onda_enter_sleep(model, true);
+        break;
+    case ONDA_COMMAND_BATTERY_SAMPLE:
+        onda_sample_battery(model);
         break;
     case ONDA_COMMAND_WIFI_STATE_CHANGED:
         model->network_state = command->wifi_state;
@@ -703,6 +750,33 @@ static void onda_retry_storage(onda_application_model_t *model)
     ESP_LOGI(TAG, "State: %s", onda_state_name(model->recording_state));
 }
 
+static void onda_sample_battery(onda_application_model_t *model)
+{
+    if (model == NULL) {
+        return;
+    }
+    if (model->recording_state == ONDA_STATE_RECORDING ||
+        model->recording_state == ONDA_STATE_FINALIZING) {
+        ESP_LOGI("ONDA_BATTERY", "Deferring battery sample during recording work");
+        return;
+    }
+
+    battery_reading_t reading = {0};
+    const esp_err_t result = battery_sample(&reading);
+    if (result != ESP_OK) {
+        ESP_LOGW("ONDA_BATTERY", "Battery sample unavailable: %s", esp_err_to_name(result));
+        return;
+    }
+    if (reading.status == model->battery_status) {
+        return;
+    }
+
+    model->battery_status = reading.status;
+    if (onda_schedule_display(model) != ESP_OK) {
+        ESP_LOGE("ONDA_BATTERY", "Failed to schedule battery display update");
+    }
+}
+
 static void onda_enter_error(onda_application_model_t *model,
                              onda_state_t state,
                              const char *operation,
@@ -761,7 +835,7 @@ static esp_err_t onda_schedule_display(const onda_application_model_t *model)
             .primary_state = onda_select_ui_primary_state(model),
             .wifi_status = onda_select_ui_wifi_status(model->network_state),
             .storage_status = model->storage_status,
-            .battery_status = DEVICE_UI_BATTERY_UNKNOWN,
+            .battery_status = onda_select_ui_battery_status(model->battery_status),
         },
     };
     if (request.state.primary_state == DEVICE_UI_PRIMARY_WIFI_SETUP) {
@@ -834,6 +908,18 @@ static device_ui_primary_state_t onda_select_ui_primary_state(const onda_applica
 static device_ui_wifi_status_t onda_select_ui_wifi_status(wifi_state_t state)
 {
     return state == WIFI_STATE_CONNECTED ? DEVICE_UI_WIFI_CONNECTED : DEVICE_UI_WIFI_OFFLINE;
+}
+
+static device_ui_battery_status_t onda_select_ui_battery_status(battery_status_t status)
+{
+    switch (status) {
+    case BATTERY_STATUS_HIGH: return DEVICE_UI_BATTERY_HIGH;
+    case BATTERY_STATUS_MEDIUM: return DEVICE_UI_BATTERY_MEDIUM;
+    case BATTERY_STATUS_LOW: return DEVICE_UI_BATTERY_LOW;
+    case BATTERY_STATUS_CRITICAL: return DEVICE_UI_BATTERY_CRITICAL;
+    case BATTERY_STATUS_UNKNOWN:
+    default: return DEVICE_UI_BATTERY_UNKNOWN;
+    }
 }
 
 static const char *onda_state_name(onda_state_t state)
