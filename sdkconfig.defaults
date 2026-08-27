@@ -21,3 +21,7 @@ CONFIG_LWIP_SNTP_UPDATE_DELAY=3600000
 # Phase 008 SD-card baseline stores its Onda-owned diagnostic file as
 # /sdcard/onda-test.txt, which requires FAT long filename support.
 CONFIG_FATFS_LFN_STACK=y
+
+# Production BFF and signed Blob uploads require verified HTTPS.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y

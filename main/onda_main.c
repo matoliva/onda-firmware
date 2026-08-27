@@ -21,8 +21,10 @@
 #include "device_ui.h"
 #include "onda_api.h"
 #include "onda_time.h"
+#include "power.h"
 #include "recording_metadata.h"
 #include "recording_naming.h"
+#include "recording_sync.h"
 #include "storage.h"
 #include "wifi.h"
 
@@ -31,11 +33,12 @@
 #define EXPECTED_PSRAM_SIZE_MB 8U
 #define ONDA_APPLICATION_COMMAND_QUEUE_LENGTH 12U
 #define ONDA_DISPLAY_STATE_QUEUE_LENGTH 1U
-#define ONDA_APPLICATION_TASK_STACK_SIZE 4096U
+#define ONDA_APPLICATION_TASK_STACK_SIZE 8192U
 #define ONDA_APPLICATION_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
 #define ONDA_DISPLAY_TASK_STACK_SIZE 4096U
 #define ONDA_DISPLAY_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
 #define ONDA_SAVED_SCREEN_TIMEOUT_MS 20000U
+#define ONDA_SYNC_SCREEN_TIMEOUT_MS 3000U
 
 static const char *TAG = "ONDA";
 
@@ -44,6 +47,13 @@ typedef enum {
     ONDA_STATE_RECORDING,
     ONDA_STATE_FINALIZING,
     ONDA_STATE_SAVED,
+    ONDA_STATE_SYNCING,
+    ONDA_STATE_SYNCED,
+    ONDA_STATE_SYNC_PARTIAL,
+    ONDA_STATE_SYNC_UP_TO_DATE,
+    ONDA_STATE_SYNC_NO_WIFI,
+    ONDA_STATE_SYNC_AUTH_ERROR,
+    ONDA_STATE_SYNC_CONNECTION_ERROR,
     ONDA_STATE_STORAGE_ERROR,
     ONDA_STATE_AUDIO_ERROR,
     ONDA_STATE_ERROR,
@@ -56,12 +66,17 @@ typedef enum {
     ONDA_COMMAND_DISPLAY_FAILURE,
     ONDA_COMMAND_RECORDER_COMPLETED,
     ONDA_COMMAND_SAVED_TIMEOUT,
+    ONDA_COMMAND_START_SYNC,
+    ONDA_COMMAND_SYNC_COMPLETED,
+    ONDA_COMMAND_ENTER_SLEEP,
+    ONDA_COMMAND_POWER_OFF,
 } onda_command_t;
 
 typedef struct {
     onda_command_t command;
     wifi_state_t wifi_state;
     audio_recorder_completion_t recorder_completion;
+    recording_sync_completion_t sync_completion;
     char proof_of_possession[DEVICE_UI_PROOF_OF_POSSESSION_LENGTH + 1U];
 } onda_application_command_t;
 
@@ -73,6 +88,8 @@ typedef struct {
     char proof_of_possession[DEVICE_UI_PROOF_OF_POSSESSION_LENGTH + 1U];
     char saved_duration[DEVICE_UI_SAVED_DURATION_LENGTH + 1U];
     char saved_filename[DEVICE_UI_SAVED_FILENAME_LENGTH + 1U];
+    char sync_detail_first_line[DEVICE_UI_SYNC_DETAIL_LENGTH + 1U];
+    char sync_detail_second_line[DEVICE_UI_SYNC_DETAIL_LENGTH + 1U];
     recording_metadata_session_t pending_metadata;
 } onda_application_model_t;
 
@@ -93,10 +110,17 @@ static void onda_saved_timer_callback(TimerHandle_t timer);
 static void onda_handle_button_event(button_event_t event, void *context);
 static void onda_handle_wifi_state(wifi_state_t state, const char *proof_of_possession, void *context);
 static void onda_handle_recorder_completion(const audio_recorder_completion_t *completion, void *context);
+static void onda_handle_sync_completion(const recording_sync_completion_t *completion, void *context);
 static void onda_handle_command(onda_application_model_t *model, const onda_application_command_t *command);
 static void onda_start_recording(onda_application_model_t *model);
 static void onda_stop_recording(onda_application_model_t *model);
+static void onda_start_sync(onda_application_model_t *model);
+static void onda_show_sync_result(onda_application_model_t *model,
+                                  recording_sync_result_kind_t kind,
+                                  size_t uploaded_count,
+                                  size_t pending_count);
 static void onda_retry_storage(onda_application_model_t *model);
+static void onda_enter_sleep(onda_application_model_t *model, bool release_battery_latch);
 static void onda_enter_error(onda_application_model_t *model,
                              onda_state_t state,
                              const char *operation,
@@ -115,6 +139,7 @@ static void onda_handle_button_event(button_event_t event, void *context)
     (void)context;
     const char *button_name = event.id == BUTTON_ID_BOOT ? "BOOT" : "PWR";
     const char *event_name = event.type == BUTTON_EVENT_SHORT_PRESS ? "short press" :
+                             event.type == BUTTON_EVENT_DOUBLE_PRESS ? "double press" :
                              event.type == BUTTON_EVENT_LONG_PRESS ? "long press" :
                              event.type == BUTTON_EVENT_VERY_LONG_PRESS ? "very long press" :
                                                                           "unknown press";
@@ -127,6 +152,12 @@ static void onda_handle_button_event(button_event_t event, void *context)
     onda_application_command_t command = {0};
     if (event.id == BUTTON_ID_BOOT && event.type == BUTTON_EVENT_SHORT_PRESS) {
         command.command = ONDA_COMMAND_TOGGLE_RECORDING;
+    } else if (event.id == BUTTON_ID_BOOT && event.type == BUTTON_EVENT_LONG_PRESS) {
+        command.command = ONDA_COMMAND_START_SYNC;
+    } else if (event.id == BUTTON_ID_PWR && event.type == BUTTON_EVENT_SHORT_PRESS) {
+        command.command = ONDA_COMMAND_ENTER_SLEEP;
+    } else if (event.id == BUTTON_ID_PWR && event.type == BUTTON_EVENT_DOUBLE_PRESS) {
+        command.command = ONDA_COMMAND_POWER_OFF;
     } else if (event.id == BUTTON_ID_PWR && event.type == BUTTON_EVENT_VERY_LONG_PRESS) {
         command.command = ONDA_COMMAND_RESET_WIFI;
     } else {
@@ -173,6 +204,22 @@ static void onda_handle_recorder_completion(const audio_recorder_completion_t *c
     }
 }
 
+static void onda_handle_sync_completion(const recording_sync_completion_t *completion, void *context)
+{
+    (void)context;
+    if (completion == NULL || s_application_command_queue == NULL) {
+        ESP_LOGE(TAG, "Sync completed before application startup");
+        return;
+    }
+    const onda_application_command_t command = {
+        .command = ONDA_COMMAND_SYNC_COMPLETED,
+        .sync_completion = *completion,
+    };
+    if (xQueueSend(s_application_command_queue, &command, pdMS_TO_TICKS(100U)) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to report sync completion");
+    }
+}
+
 static void onda_saved_timer_callback(TimerHandle_t timer)
 {
     (void)timer;
@@ -188,6 +235,11 @@ static void onda_saved_timer_callback(TimerHandle_t timer)
 void app_main(void)
 {
     ESP_LOGI(TAG, "Starting Onda firmware");
+    const esp_err_t power_result = power_init();
+    if (power_result != ESP_OK) {
+        ESP_LOGE(TAG, "Battery power initialisation failed: %s", esp_err_to_name(power_result));
+        return;
+    }
     esp_chip_info_t chip_info;
     esp_chip_info(&chip_info);
     ESP_LOGI(TAG, "Target: %s, cores: %u, silicon revision: v%u.%u", CONFIG_IDF_TARGET,
@@ -256,6 +308,10 @@ void app_main(void)
     const esp_err_t api_result = onda_api_init();
     if (api_result != ESP_OK) {
         ESP_LOGE(TAG, "Device API unavailable: %s", esp_err_to_name(api_result));
+    }
+    const esp_err_t sync_result = recording_sync_init();
+    if (sync_result != ESP_OK) {
+        ESP_LOGE(TAG, "Recording sync unavailable: %s", esp_err_to_name(sync_result));
     }
     const esp_err_t wifi_result = wifi_start(onda_handle_wifi_state, NULL);
     if (wifi_result != ESP_OK) {
@@ -347,6 +403,15 @@ static void onda_handle_command(onda_application_model_t *model, const onda_appl
             (void)onda_schedule_display(model);
         }
         break;
+    case ONDA_COMMAND_START_SYNC:
+        onda_start_sync(model);
+        break;
+    case ONDA_COMMAND_ENTER_SLEEP:
+        onda_enter_sleep(model, false);
+        break;
+    case ONDA_COMMAND_POWER_OFF:
+        onda_enter_sleep(model, true);
+        break;
     case ONDA_COMMAND_WIFI_STATE_CHANGED:
         model->network_state = command->wifi_state;
         if (command->proof_of_possession[0] != '\0') {
@@ -425,16 +490,31 @@ static void onda_handle_command(onda_application_model_t *model, const onda_appl
                  (unsigned)command->recorder_completion.data_bytes);
         if (onda_schedule_display(model) != ESP_OK) {
             onda_enter_error(model, ONDA_STATE_ERROR, "Saved display request", ESP_FAIL, false);
-        } else if (xTimerReset(s_saved_timer, 0) != pdPASS) {
+        } else if (xTimerChangePeriod(s_saved_timer, pdMS_TO_TICKS(ONDA_SAVED_SCREEN_TIMEOUT_MS), 0) != pdPASS) {
             ESP_LOGE(TAG, "Failed to start Saved timeout");
         }
         break;
     case ONDA_COMMAND_SAVED_TIMEOUT:
-        if (model->recording_state == ONDA_STATE_SAVED) {
+        if (model->recording_state == ONDA_STATE_SAVED ||
+            model->recording_state == ONDA_STATE_SYNCED ||
+            model->recording_state == ONDA_STATE_SYNC_PARTIAL ||
+            model->recording_state == ONDA_STATE_SYNC_UP_TO_DATE ||
+            model->recording_state == ONDA_STATE_SYNC_NO_WIFI ||
+            model->recording_state == ONDA_STATE_SYNC_AUTH_ERROR ||
+            model->recording_state == ONDA_STATE_SYNC_CONNECTION_ERROR) {
             model->recording_state = ONDA_STATE_READY;
             (void)onda_schedule_display(model);
-            ESP_LOGI(TAG, "Saved confirmation timeout elapsed");
+            ESP_LOGI(TAG, "Confirmation timeout elapsed");
         }
+        break;
+    case ONDA_COMMAND_SYNC_COMPLETED:
+        if (model->recording_state != ONDA_STATE_SYNCING) {
+            ESP_LOGW(TAG, "Ignoring sync completion outside SYNCING state");
+            break;
+        }
+        onda_show_sync_result(model, command->sync_completion.kind,
+                              command->sync_completion.uploaded_count,
+                              command->sync_completion.pending_count);
         break;
     default:
         onda_enter_error(model, ONDA_STATE_ERROR, "Command handling", ESP_ERR_INVALID_ARG, false);
@@ -488,6 +568,116 @@ static void onda_stop_recording(onda_application_model_t *model)
     const esp_err_t result = audio_recorder_stop();
     if (result != ESP_OK) {
         onda_enter_error(model, ONDA_STATE_ERROR, "Recording stop", result, false);
+    }
+}
+
+static void onda_enter_sleep(onda_application_model_t *model, bool release_battery_latch)
+{
+    if (model == NULL || model->recording_state != ONDA_STATE_READY) {
+        ESP_LOGW(TAG, "Ignoring power request unless recording is READY");
+        return;
+    }
+
+    const esp_err_t wifi_result = wifi_stop();
+    if (wifi_result != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi cleanup before sleep failed: %s", esp_err_to_name(wifi_result));
+    }
+
+    if (release_battery_latch) {
+        ESP_LOGI(TAG, "Power-off requested");
+        const esp_err_t latch_result = power_release_battery_latch();
+        if (latch_result != ESP_OK) {
+            onda_enter_error(model, ONDA_STATE_ERROR, "Battery power release", latch_result, false);
+            return;
+        }
+    }
+
+    const esp_err_t sleep_result = release_battery_latch ? power_enter_off_sleep() : power_enter_sleep();
+    onda_enter_error(model, ONDA_STATE_ERROR,
+                     release_battery_latch ? "Power-off sleep entry" : "Sleep entry", sleep_result,
+                     false);
+}
+
+static void onda_start_sync(onda_application_model_t *model)
+{
+    if (model == NULL || model->recording_state != ONDA_STATE_READY) {
+        ESP_LOGW(TAG, "Ignoring sync unless recording is READY");
+        return;
+    }
+    size_t pending_count = 0U;
+    const esp_err_t count_result = recording_sync_count_pending(&pending_count);
+    if (count_result != ESP_OK) {
+        model->storage_status = DEVICE_UI_STORAGE_ERROR;
+        onda_enter_error(model, ONDA_STATE_STORAGE_ERROR, "Pending recording scan", count_result, false);
+        return;
+    }
+    if (pending_count == 0U) {
+        onda_show_sync_result(model, RECORDING_SYNC_RESULT_UP_TO_DATE, 0U, 0U);
+        return;
+    }
+    if (model->network_state != WIFI_STATE_CONNECTED) {
+        model->recording_state = ONDA_STATE_SYNC_NO_WIFI;
+        (void)snprintf(model->sync_detail_first_line, sizeof(model->sync_detail_first_line), "%u pending",
+                       (unsigned)pending_count);
+        if (onda_schedule_display(model) == ESP_OK) {
+            (void)xTimerChangePeriod(s_saved_timer, pdMS_TO_TICKS(ONDA_SYNC_SCREEN_TIMEOUT_MS), 0);
+        }
+        return;
+    }
+    (void)snprintf(model->sync_detail_first_line, sizeof(model->sync_detail_first_line), "%u pending",
+                   (unsigned)pending_count);
+    model->sync_detail_second_line[0] = '\0';
+    model->recording_state = ONDA_STATE_SYNCING;
+    if (onda_schedule_display(model) != ESP_OK) {
+        onda_enter_error(model, ONDA_STATE_ERROR, "Sync display request", ESP_FAIL, false);
+        return;
+    }
+    const esp_err_t sync_result = recording_sync_start(onda_handle_sync_completion, NULL);
+    if (sync_result != ESP_OK) {
+        onda_show_sync_result(model, RECORDING_SYNC_RESULT_PARTIAL, 0U, pending_count);
+    }
+}
+
+static void onda_show_sync_result(onda_application_model_t *model,
+                                  recording_sync_result_kind_t kind,
+                                  size_t uploaded_count,
+                                  size_t pending_count)
+{
+    if (model == NULL) {
+        return;
+    }
+    memset(model->sync_detail_first_line, 0, sizeof(model->sync_detail_first_line));
+    memset(model->sync_detail_second_line, 0, sizeof(model->sync_detail_second_line));
+    switch (kind) {
+    case RECORDING_SYNC_RESULT_SYNCED:
+        model->recording_state = ONDA_STATE_SYNCED;
+        (void)snprintf(model->sync_detail_first_line, sizeof(model->sync_detail_first_line), "%u uploaded",
+                       (unsigned)uploaded_count);
+        break;
+    case RECORDING_SYNC_RESULT_UP_TO_DATE:
+        model->recording_state = ONDA_STATE_SYNC_UP_TO_DATE;
+        break;
+    case RECORDING_SYNC_RESULT_AUTH_FAILURE:
+        model->recording_state = ONDA_STATE_SYNC_AUTH_ERROR;
+        break;
+    case RECORDING_SYNC_RESULT_CONNECTION_FAILURE:
+        model->recording_state = ONDA_STATE_SYNC_CONNECTION_ERROR;
+        (void)snprintf(model->sync_detail_first_line, sizeof(model->sync_detail_first_line), "%u pending",
+                       (unsigned)pending_count);
+        break;
+    case RECORDING_SYNC_RESULT_PARTIAL:
+    default:
+        model->recording_state = ONDA_STATE_SYNC_PARTIAL;
+        (void)snprintf(model->sync_detail_first_line, sizeof(model->sync_detail_first_line), "%u uploaded",
+                       (unsigned)uploaded_count);
+        (void)snprintf(model->sync_detail_second_line, sizeof(model->sync_detail_second_line), "%u pending",
+                       (unsigned)pending_count);
+        break;
+    }
+    if (onda_schedule_display(model) != ESP_OK) {
+        onda_enter_error(model, ONDA_STATE_ERROR, "Sync result display", ESP_FAIL, false);
+    } else if (xTimerChangePeriod(s_saved_timer, pdMS_TO_TICKS(ONDA_SYNC_SCREEN_TIMEOUT_MS), 0) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start sync result timeout");
     }
 }
 
@@ -584,6 +774,16 @@ static esp_err_t onda_schedule_display(const onda_application_model_t *model)
         strncpy(request.state.saved_filename, model->saved_filename,
                 sizeof(request.state.saved_filename) - 1U);
     }
+    if (request.state.primary_state == DEVICE_UI_PRIMARY_SYNCING ||
+        request.state.primary_state == DEVICE_UI_PRIMARY_SYNCED ||
+        request.state.primary_state == DEVICE_UI_PRIMARY_SYNC_PARTIAL ||
+        request.state.primary_state == DEVICE_UI_PRIMARY_NO_WIFI ||
+        request.state.primary_state == DEVICE_UI_PRIMARY_SYNC_CONNECTION_ERROR) {
+        strncpy(request.state.sync_detail_first_line, model->sync_detail_first_line,
+                sizeof(request.state.sync_detail_first_line) - 1U);
+        strncpy(request.state.sync_detail_second_line, model->sync_detail_second_line,
+                sizeof(request.state.sync_detail_second_line) - 1U);
+    }
     return xQueueOverwrite(s_display_state_queue, &request) == pdPASS ? ESP_OK : ESP_FAIL;
 }
 
@@ -601,6 +801,20 @@ static device_ui_primary_state_t onda_select_ui_primary_state(const onda_applica
         return DEVICE_UI_PRIMARY_FINALIZING;
     case ONDA_STATE_SAVED:
         return DEVICE_UI_PRIMARY_SAVED;
+    case ONDA_STATE_SYNCING:
+        return DEVICE_UI_PRIMARY_SYNCING;
+    case ONDA_STATE_SYNCED:
+        return DEVICE_UI_PRIMARY_SYNCED;
+    case ONDA_STATE_SYNC_PARTIAL:
+        return DEVICE_UI_PRIMARY_SYNC_PARTIAL;
+    case ONDA_STATE_SYNC_UP_TO_DATE:
+        return DEVICE_UI_PRIMARY_UP_TO_DATE;
+    case ONDA_STATE_SYNC_NO_WIFI:
+        return DEVICE_UI_PRIMARY_NO_WIFI;
+    case ONDA_STATE_SYNC_AUTH_ERROR:
+        return DEVICE_UI_PRIMARY_SYNC_AUTH_ERROR;
+    case ONDA_STATE_SYNC_CONNECTION_ERROR:
+        return DEVICE_UI_PRIMARY_SYNC_CONNECTION_ERROR;
     case ONDA_STATE_STORAGE_ERROR:
         return DEVICE_UI_PRIMARY_STORAGE_ERROR;
     case ONDA_STATE_AUDIO_ERROR:
@@ -629,6 +843,13 @@ static const char *onda_state_name(onda_state_t state)
     case ONDA_STATE_RECORDING: return "RECORDING";
     case ONDA_STATE_FINALIZING: return "FINALIZING";
     case ONDA_STATE_SAVED: return "SAVED";
+    case ONDA_STATE_SYNCING: return "SYNCING";
+    case ONDA_STATE_SYNCED: return "SYNCED";
+    case ONDA_STATE_SYNC_PARTIAL: return "SYNC_PARTIAL";
+    case ONDA_STATE_SYNC_UP_TO_DATE: return "SYNC_UP_TO_DATE";
+    case ONDA_STATE_SYNC_NO_WIFI: return "SYNC_NO_WIFI";
+    case ONDA_STATE_SYNC_AUTH_ERROR: return "SYNC_AUTH_ERROR";
+    case ONDA_STATE_SYNC_CONNECTION_ERROR: return "SYNC_CONNECTION_ERROR";
     case ONDA_STATE_STORAGE_ERROR: return "STORAGE_ERROR";
     case ONDA_STATE_AUDIO_ERROR: return "AUDIO_ERROR";
     case ONDA_STATE_ERROR: return "ERROR";

@@ -193,22 +193,34 @@ static void audio_recorder_task(void *context)
         if (mono_bytes == 0U) {
             continue;
         }
-        if (data_bytes > UINT32_MAX - mono_bytes) {
+        if (data_bytes >= AUDIO_RECORDER_MAX_PCM_BYTES) {
+            break;
+        }
+        size_t writable_bytes = mono_bytes;
+        const size_t remaining_bytes = AUDIO_RECORDER_MAX_PCM_BYTES - data_bytes;
+        if (writable_bytes > remaining_bytes) {
+            writable_bytes = remaining_bytes;
+        }
+        if (data_bytes > UINT32_MAX - writable_bytes) {
             ESP_LOGE(TAG, "WAV data exceeds the 4 GiB PCM limit");
             result = ESP_ERR_INVALID_SIZE;
             goto cleanup_capture;
         }
 
-        result = storage_file_write(file, s_mono_buffer, mono_bytes);
+        result = storage_file_write(file, s_mono_buffer, writable_bytes);
         if (result != ESP_OK) {
             ESP_LOGE(TAG, "SD write failed: %s", esp_err_to_name(result));
             goto cleanup_capture;
         }
-        data_bytes += mono_bytes;
+        data_bytes += writable_bytes;
         while (data_bytes >= next_progress_bytes) {
             ESP_LOGI(TAG, "Recording progress: %u s", (unsigned)(next_progress_bytes /
                                                                     AUDIO_RECORDER_BYTES_PER_SECOND));
             next_progress_bytes += AUDIO_RECORDER_BYTES_PER_SECOND;
+        }
+        if (data_bytes == AUDIO_RECORDER_MAX_PCM_BYTES) {
+            ESP_LOGI(TAG, "Recording reached the two-hour duration limit");
+            break;
         }
     }
 

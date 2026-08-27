@@ -20,6 +20,7 @@
 #define BUTTON_DEBOUNCE_MS 15U
 #define BUTTON_LONG_PRESS_US (1000LL * 1000LL)
 #define BUTTON_VERY_LONG_PRESS_US (3000LL * 1000LL)
+#define BUTTON_DOUBLE_PRESS_GAP_US (300LL * 1000LL)
 #define BUTTON_TASK_STACK_SIZE 4096U
 #define BUTTON_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
 
@@ -33,9 +34,12 @@ typedef struct {
     gpio_num_t gpio;
     uint32_t notification_bit;
     bool pressed;
+    bool suppress_initial_release;
+    bool pending_short_press;
     bool long_press_reported;
     bool very_long_press_reported;
     int64_t pressed_at_us;
+    int64_t short_press_deadline_us;
 } button_state_t;
 
 static button_state_t s_buttons[] = {
@@ -55,6 +59,7 @@ static void buttons_task(void *context);
 static void buttons_isr(void *argument);
 static void buttons_process_level(button_state_t *button, int level);
 static void buttons_report_due_long_presses(void);
+static void buttons_report_due_short_presses(void);
 static TickType_t buttons_next_wait(void);
 static void buttons_emit(button_state_t *button, button_event_type_t type);
 static esp_err_t buttons_add_isr_handlers(void);
@@ -97,9 +102,13 @@ esp_err_t buttons_init(buttons_event_handler_t handler, void *context)
 
     for (size_t index = 0; index < sizeof(s_buttons) / sizeof(s_buttons[0]); ++index) {
         s_buttons[index].pressed = gpio_get_level(s_buttons[index].gpio) == BUTTON_ACTIVE_LEVEL;
+        s_buttons[index].suppress_initial_release = s_buttons[index].id == BUTTON_ID_PWR &&
+                                                    s_buttons[index].pressed;
+        s_buttons[index].pending_short_press = false;
         s_buttons[index].long_press_reported = false;
         s_buttons[index].very_long_press_reported = false;
         s_buttons[index].pressed_at_us = esp_timer_get_time();
+        s_buttons[index].short_press_deadline_us = 0;
     }
 
     const BaseType_t task_result = xTaskCreate(buttons_task,
@@ -161,6 +170,7 @@ static void buttons_task(void *context)
         }
 
         buttons_report_due_long_presses();
+        buttons_report_due_short_presses();
     }
 }
 
@@ -192,12 +202,35 @@ static void buttons_process_level(button_state_t *button, int level)
         return;
     }
 
+    if (button->suppress_initial_release) {
+        button->suppress_initial_release = false;
+        button->long_press_reported = false;
+        button->very_long_press_reported = false;
+        ESP_LOGI(TAG, "Ignored initial PWR release");
+        return;
+    }
+
     if (!button->long_press_reported) {
         const int64_t duration_us = now_us - button->pressed_at_us;
-        const button_event_type_t type = duration_us >= BUTTON_LONG_PRESS_US
-                                             ? BUTTON_EVENT_LONG_PRESS
-                                             : BUTTON_EVENT_SHORT_PRESS;
-        buttons_emit(button, type);
+        if (duration_us >= BUTTON_LONG_PRESS_US) {
+            button->pending_short_press = false;
+            button->short_press_deadline_us = 0;
+            buttons_emit(button, BUTTON_EVENT_LONG_PRESS);
+        } else if (button->id == BUTTON_ID_PWR) {
+            if (button->pending_short_press && now_us <= button->short_press_deadline_us) {
+                button->pending_short_press = false;
+                button->short_press_deadline_us = 0;
+                buttons_emit(button, BUTTON_EVENT_DOUBLE_PRESS);
+            } else {
+                if (button->pending_short_press) {
+                    buttons_emit(button, BUTTON_EVENT_SHORT_PRESS);
+                }
+                button->pending_short_press = true;
+                button->short_press_deadline_us = now_us + BUTTON_DOUBLE_PRESS_GAP_US;
+            }
+        } else {
+            buttons_emit(button, BUTTON_EVENT_SHORT_PRESS);
+        }
     }
 
     button->long_press_reported = false;
@@ -214,6 +247,10 @@ static void buttons_report_due_long_presses(void)
             continue;
         }
 
+        if (button->suppress_initial_release) {
+            continue;
+        }
+
         if (gpio_get_level(button->gpio) != BUTTON_ACTIVE_LEVEL) {
             buttons_process_level(button, gpio_get_level(button->gpio));
             continue;
@@ -222,12 +259,30 @@ static void buttons_report_due_long_presses(void)
         const int64_t held_us = now_us - button->pressed_at_us;
         if (!button->long_press_reported && held_us >= BUTTON_LONG_PRESS_US) {
             button->long_press_reported = true;
+            /* A hold cannot complete a pending PWR double press. */
+            button->pending_short_press = false;
+            button->short_press_deadline_us = 0;
             buttons_emit(button, BUTTON_EVENT_LONG_PRESS);
         }
         if (!button->very_long_press_reported && held_us >= BUTTON_VERY_LONG_PRESS_US) {
             button->very_long_press_reported = true;
             buttons_emit(button, BUTTON_EVENT_VERY_LONG_PRESS);
         }
+    }
+}
+
+static void buttons_report_due_short_presses(void)
+{
+    const int64_t now_us = esp_timer_get_time();
+    for (size_t index = 0; index < sizeof(s_buttons) / sizeof(s_buttons[0]); ++index) {
+        button_state_t *button = &s_buttons[index];
+        if (!button->pending_short_press || button->pressed ||
+            now_us < button->short_press_deadline_us) {
+            continue;
+        }
+        button->pending_short_press = false;
+        button->short_press_deadline_us = 0;
+        buttons_emit(button, BUTTON_EVENT_SHORT_PRESS);
     }
 }
 
@@ -238,6 +293,15 @@ static TickType_t buttons_next_wait(void)
 
     for (size_t index = 0; index < sizeof(s_buttons) / sizeof(s_buttons[0]); ++index) {
         const button_state_t *button = &s_buttons[index];
+        if (button->pending_short_press && !button->pressed) {
+            const int64_t remaining_us = button->short_press_deadline_us - now_us;
+            if (remaining_us <= 0) {
+                return 0;
+            }
+            if (remaining_us < smallest_remaining_us) {
+                smallest_remaining_us = remaining_us;
+            }
+        }
         if (!button->pressed || button->very_long_press_reported) {
             continue;
         }

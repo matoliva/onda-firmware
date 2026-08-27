@@ -94,6 +94,51 @@ esp_err_t device_ui_describe(const device_ui_state_t *state,
         screen->detail_second_line = state->saved_filename;
         screen->accent_color = DISPLAY_COLOR_YELLOW;
         break;
+    case DEVICE_UI_PRIMARY_SYNCING:
+        screen->title = "SYNCING";
+        screen->title_color = DISPLAY_COLOR_BLACK;
+        screen->detail_first_line = state->sync_detail_first_line;
+        screen->accent_color = DISPLAY_COLOR_YELLOW;
+        break;
+    case DEVICE_UI_PRIMARY_SYNCED:
+        screen->title = "SYNCED";
+        screen->title_color = DISPLAY_COLOR_BLACK;
+        screen->detail_first_line = state->sync_detail_first_line;
+        screen->accent_color = DISPLAY_COLOR_YELLOW;
+        break;
+    case DEVICE_UI_PRIMARY_SYNC_PARTIAL:
+        screen->title = "SYNC COMPLETE";
+        screen->title_color = DISPLAY_COLOR_BLACK;
+        screen->detail_first_line = state->sync_detail_first_line;
+        screen->detail_second_line = state->sync_detail_second_line;
+        screen->accent_color = DISPLAY_COLOR_YELLOW;
+        break;
+    case DEVICE_UI_PRIMARY_UP_TO_DATE:
+        screen->title = "UP TO DATE";
+        screen->title_color = DISPLAY_COLOR_BLACK;
+        screen->detail_first_line = "No pending";
+        screen->detail_second_line = "recordings";
+        screen->accent_color = DISPLAY_COLOR_YELLOW;
+        break;
+    case DEVICE_UI_PRIMARY_NO_WIFI:
+        screen->title = "NO WIFI";
+        screen->title_color = DISPLAY_COLOR_BLACK;
+        screen->detail_first_line = state->sync_detail_first_line;
+        screen->accent_color = DISPLAY_COLOR_RED;
+        break;
+    case DEVICE_UI_PRIMARY_SYNC_AUTH_ERROR:
+        screen->title = "SYNC ERROR";
+        screen->title_color = DISPLAY_COLOR_BLACK;
+        screen->detail_first_line = "Authentication";
+        screen->detail_second_line = "failed";
+        screen->accent_color = DISPLAY_COLOR_RED;
+        break;
+    case DEVICE_UI_PRIMARY_SYNC_CONNECTION_ERROR:
+        screen->title = "NO CONNECTION";
+        screen->title_color = DISPLAY_COLOR_BLACK;
+        screen->detail_first_line = state->sync_detail_first_line;
+        screen->accent_color = DISPLAY_COLOR_RED;
+        break;
     case DEVICE_UI_PRIMARY_WIFI_SETUP:
         if (state->proof_of_possession[0] == '\0') {
             return ESP_ERR_INVALID_STATE;

@@ -75,3 +75,11 @@ TEST_CASE("audio recorder requires a closed WAV header and nonempty PCM payload"
     TEST_ASSERT_FALSE(audio_recorder_has_valid_file_size(AUDIO_RECORDER_WAV_HEADER_SIZE + 1U,
                                                           32000U));
 }
+
+TEST_CASE("audio recorder caps canonical recordings below the BFF upload limit", "[audio_recorder]")
+{
+    TEST_ASSERT_EQUAL_UINT32(7200000U, AUDIO_RECORDER_MAX_DURATION_MS);
+    TEST_ASSERT_EQUAL_UINT32(230400000U, AUDIO_RECORDER_MAX_PCM_BYTES);
+    TEST_ASSERT_EQUAL_UINT32(230400044U, AUDIO_RECORDER_MAX_FILE_SIZE_BYTES);
+    TEST_ASSERT_LESS_THAN_UINT32(256U * 1024U * 1024U, AUDIO_RECORDER_MAX_FILE_SIZE_BYTES);
+}

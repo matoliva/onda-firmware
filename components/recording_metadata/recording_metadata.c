@@ -22,6 +22,11 @@ typedef struct {
     const char *suffix;
 } recording_metadata_recovery_context_t;
 
+typedef struct {
+    recording_metadata_pending_callback_t callback;
+    void *context;
+} recording_metadata_pending_context_t;
+
 static esp_err_t recording_metadata_derive_paths(const char *wav_path,
                                                    recording_metadata_session_t *session);
 static esp_err_t recording_metadata_write_file(const char *path, const char *text);
@@ -30,6 +35,7 @@ static esp_err_t recording_metadata_make_seed_json(const recording_metadata_sess
                                                     size_t output_size);
 static esp_err_t recording_metadata_make_final_json(const recording_metadata_session_t *session,
                                                      uint32_t duration_ms,
+                                                     size_t size_bytes,
                                                      char *output,
                                                      size_t output_size);
 static esp_err_t recording_metadata_parse_seed(const char *text,
@@ -45,6 +51,15 @@ static bool recording_metadata_copy_string(const cJSON *object,
                                            size_t destination_size);
 static esp_err_t recording_metadata_validate_published_json(const char *path,
                                                             const recording_metadata_session_t *session);
+static esp_err_t recording_metadata_read_record(const char *path,
+                                                recording_metadata_record_t *record);
+static esp_err_t recording_metadata_pending_entry(const char *path, void *context);
+static esp_err_t recording_metadata_write_record(const recording_metadata_record_t *record);
+static esp_err_t recording_metadata_make_record_json(const recording_metadata_record_t *record,
+                                                      char *output,
+                                                      size_t output_size);
+static bool recording_metadata_is_rfc3339(const char *value);
+static bool recording_metadata_is_safe_identifier(const char *value, size_t maximum_length);
 
 esp_err_t recording_metadata_make_id(const uint8_t random_bytes[16],
                                      char id[RECORDING_METADATA_ID_LENGTH + 1U])
@@ -145,8 +160,13 @@ esp_err_t recording_metadata_finalize(const recording_metadata_session_t *sessio
     if (result != ESP_OK) {
         return result;
     }
+    size_t size_bytes = 0U;
+    result = storage_file_get_size(session->final_wav_path, &size_bytes);
+    if (result != ESP_OK) {
+        return result;
+    }
     char json[RECORDING_METADATA_JSON_MAX];
-    result = recording_metadata_make_final_json(session, duration_ms, json, sizeof(json));
+    result = recording_metadata_make_final_json(session, duration_ms, size_bytes, json, sizeof(json));
     if (result != ESP_OK) {
         return result;
     }
@@ -191,6 +211,48 @@ esp_err_t recording_metadata_recover(void)
 {
     const recording_metadata_recovery_context_t context = {.suffix = RECORDING_METADATA_SEED_SUFFIX};
     return storage_recordings_iterate(recording_metadata_recover_entry, (void *)&context);
+}
+
+esp_err_t recording_metadata_for_each_pending(recording_metadata_pending_callback_t callback,
+                                              void *context)
+{
+    if (callback == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    recording_metadata_pending_context_t pending_context = {.callback = callback, .context = context};
+    return storage_recordings_iterate(recording_metadata_pending_entry, &pending_context);
+}
+
+esp_err_t recording_metadata_ensure_size(recording_metadata_record_t *record)
+{
+    if (record == NULL || record->status != RECORDING_METADATA_STATUS_PENDING) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    size_t actual_size = 0U;
+    const esp_err_t size_result = storage_file_get_size(record->wav_path, &actual_size);
+    if (size_result != ESP_OK || actual_size <= 44U) {
+        return size_result == ESP_OK ? ESP_ERR_INVALID_SIZE : size_result;
+    }
+    if (record->size_bytes == actual_size) {
+        return ESP_OK;
+    }
+    record->size_bytes = actual_size;
+    return recording_metadata_write_record(record);
+}
+
+esp_err_t recording_metadata_mark_synced(recording_metadata_record_t *record,
+                                         const char *meeting_id,
+                                         const char *synced_at)
+{
+    if (record == NULL || record->status != RECORDING_METADATA_STATUS_PENDING ||
+        !recording_metadata_is_safe_identifier(meeting_id, RECORDING_METADATA_MEETING_ID_MAX) ||
+        !recording_metadata_is_rfc3339(synced_at)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    strncpy(record->meeting_id, meeting_id, sizeof(record->meeting_id) - 1U);
+    strncpy(record->synced_at, synced_at, sizeof(record->synced_at) - 1U);
+    record->status = RECORDING_METADATA_STATUS_SYNCED;
+    return recording_metadata_write_record(record);
 }
 
 static esp_err_t recording_metadata_derive_paths(const char *wav_path,
@@ -263,6 +325,7 @@ static esp_err_t recording_metadata_make_seed_json(const recording_metadata_sess
 
 static esp_err_t recording_metadata_make_final_json(const recording_metadata_session_t *session,
                                                      uint32_t duration_ms,
+                                                     size_t size_bytes,
                                                      char *output,
                                                      size_t output_size)
 {
@@ -274,8 +337,8 @@ static esp_err_t recording_metadata_make_final_json(const recording_metadata_ses
     const size_t prefix_length = strlen(seed) - 1U;
     memcpy(output, seed, prefix_length);
     const int written = snprintf(output + prefix_length, output_size - prefix_length,
-                                 ",\"durationMs\":%u,\"status\":\"pending\",\"meetingId\":null,\"syncedAt\":null}",
-                                 (unsigned)duration_ms);
+                                 ",\"durationMs\":%u,\"sizeBytes\":%zu,\"status\":\"pending\",\"meetingId\":null,\"syncedAt\":null}",
+                                 (unsigned)duration_ms, size_bytes);
     if (written < 0 || (size_t)written >= output_size - prefix_length) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -391,6 +454,217 @@ static esp_err_t recording_metadata_validate_final_wav(const char *path, size_t 
     }
     *pcm_data_bytes = file_size - sizeof(header);
     return ESP_OK;
+}
+
+static esp_err_t recording_metadata_pending_entry(const char *path, void *context)
+{
+    recording_metadata_pending_context_t *pending = context;
+    if (pending == NULL || !recording_metadata_has_suffix(path, RECORDING_METADATA_FINAL_SUFFIX)) {
+        return ESP_OK;
+    }
+    recording_metadata_record_t record = {0};
+    const esp_err_t read_result = recording_metadata_read_record(path, &record);
+    if (read_result != ESP_OK) {
+        ESP_LOGW(TAG, "Ignoring malformed recording metadata %s", path);
+        return ESP_OK;
+    }
+    return record.status == RECORDING_METADATA_STATUS_PENDING
+               ? pending->callback(&record, pending->context)
+               : ESP_OK;
+}
+
+static esp_err_t recording_metadata_read_record(const char *path,
+                                                recording_metadata_record_t *record)
+{
+    if (path == NULL || record == NULL || !recording_metadata_has_suffix(path, RECORDING_METADATA_FINAL_SUFFIX)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    size_t json_size = 0U;
+    esp_err_t result = storage_file_get_size(path, &json_size);
+    if (result != ESP_OK || json_size == 0U || json_size >= RECORDING_METADATA_JSON_MAX) {
+        return result == ESP_OK ? ESP_ERR_INVALID_SIZE : result;
+    }
+    char json[RECORDING_METADATA_JSON_MAX];
+    size_t length = 0U;
+    result = storage_file_read(path, json, json_size, &length);
+    if (result != ESP_OK) {
+        return result;
+    }
+    json[length] = '\0';
+    const char *end = NULL;
+    cJSON *root = cJSON_ParseWithLengthOpts(json, length, &end, false);
+    const cJSON *created_at = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "createdAt");
+    const cJSON *duration = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "durationMs");
+    const cJSON *size = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "sizeBytes");
+    const cJSON *status = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "status");
+    const cJSON *meeting_id = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "meetingId");
+    const cJSON *synced_at = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "syncedAt");
+    const bool has_size = cJSON_IsNumber(size) && size->valuedouble > 44.0 &&
+                          size->valuedouble <= (double)SIZE_MAX &&
+                          (size_t)size->valuedouble == size->valuedouble;
+    const bool is_pending = cJSON_IsString(status) && strcmp(status->valuestring, "pending") == 0;
+    const bool is_synced = cJSON_IsString(status) && strcmp(status->valuestring, "synced") == 0;
+    char file[RECORDING_NAMING_PATH_MAX] = {0};
+    bool valid = root != NULL && end != NULL && *end == '\0' && cJSON_IsObject(root) &&
+                       recording_metadata_copy_string(root, "id", record->id, sizeof(record->id)) &&
+                       recording_metadata_is_safe_identifier(record->id, RECORDING_METADATA_ID_LENGTH) &&
+                       recording_metadata_copy_string(root, "file", file, sizeof(file)) &&
+                       cJSON_IsNumber(duration) && duration->valuedouble > 0.0 &&
+                       duration->valuedouble <= UINT32_MAX &&
+                       (uint32_t)duration->valuedouble == duration->valuedouble &&
+                       (cJSON_IsNull(created_at) ||
+                        (cJSON_IsString(created_at) && recording_metadata_is_rfc3339(created_at->valuestring))) &&
+                       (is_pending || is_synced) &&
+                       (size == NULL || has_size) &&
+                       ((is_pending && cJSON_IsNull(meeting_id) && cJSON_IsNull(synced_at)) ||
+                        (is_synced && recording_metadata_copy_string(root, "meetingId", record->meeting_id,
+                                                                      sizeof(record->meeting_id)) &&
+                         recording_metadata_is_safe_identifier(record->meeting_id,
+                                                               RECORDING_METADATA_MEETING_ID_MAX) &&
+                         recording_metadata_copy_string(root, "syncedAt", record->synced_at,
+                                                        sizeof(record->synced_at)) &&
+                         recording_metadata_is_rfc3339(record->synced_at)));
+    if (valid) {
+        const size_t path_length = strlen(path);
+        const size_t suffix_length = strlen(RECORDING_METADATA_FINAL_SUFFIX);
+        const int wav_written = snprintf(record->wav_path, sizeof(record->wav_path), "%.*s.wav",
+                                         (int)(path_length - suffix_length), path);
+        const int metadata_written = snprintf(record->metadata_path, sizeof(record->metadata_path), "%s", path);
+        valid = wav_written >= 0 && (size_t)wav_written < sizeof(record->wav_path) &&
+                metadata_written >= 0 && (size_t)metadata_written < sizeof(record->metadata_path) &&
+                strcmp(strrchr(record->wav_path, '/') + 1U, file) == 0;
+    }
+    if (valid) {
+        record->has_created_at = cJSON_IsString(created_at);
+        if (record->has_created_at) {
+            strncpy(record->created_at, created_at->valuestring, sizeof(record->created_at) - 1U);
+        }
+        record->duration_ms = (uint32_t)duration->valuedouble;
+        record->size_bytes = has_size ? (size_t)size->valuedouble : 0U;
+        record->status = is_pending ? RECORDING_METADATA_STATUS_PENDING : RECORDING_METADATA_STATUS_SYNCED;
+    }
+    cJSON_Delete(root);
+    return valid ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
+}
+
+static esp_err_t recording_metadata_write_record(const recording_metadata_record_t *record)
+{
+    char json[RECORDING_METADATA_JSON_MAX];
+    const esp_err_t serialize_result = recording_metadata_make_record_json(record, json, sizeof(json));
+    if (serialize_result != ESP_OK) {
+        return serialize_result;
+    }
+    char staging_path[RECORDING_METADATA_PATH_MAX];
+    const int staging_written = snprintf(staging_path, sizeof(staging_path), "%s.part", record->metadata_path);
+    if (staging_written < 0 || (size_t)staging_written >= sizeof(staging_path)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    (void)storage_file_remove(staging_path);
+    const esp_err_t write_result = recording_metadata_write_file(staging_path, json);
+    if (write_result != ESP_OK) {
+        return write_result;
+    }
+    const esp_err_t replace_result = storage_file_replace(staging_path, record->metadata_path);
+    if (replace_result != ESP_OK) {
+        (void)storage_file_remove(staging_path);
+    }
+    return replace_result;
+}
+
+static esp_err_t recording_metadata_make_record_json(const recording_metadata_record_t *record,
+                                                      char *output,
+                                                      size_t output_size)
+{
+    if (record == NULL || output == NULL || output_size == 0U || record->id[0] == '\0' ||
+        record->wav_path[0] == '\0' || record->size_bytes <= 44U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const char *basename = strrchr(record->wav_path, '/');
+    if (basename == NULL || basename[1] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const char *created_at = record->has_created_at ? record->created_at : NULL;
+    int written = 0;
+    if (record->status == RECORDING_METADATA_STATUS_PENDING) {
+        written = created_at == NULL
+                      ? snprintf(output, output_size,
+                                 "{\"id\":\"%s\",\"file\":\"%s\",\"createdAt\":null,\"durationMs\":%u,\"sizeBytes\":%zu,\"status\":\"pending\",\"meetingId\":null,\"syncedAt\":null}",
+                                 record->id, basename + 1U, (unsigned)record->duration_ms, record->size_bytes)
+                      : snprintf(output, output_size,
+                                 "{\"id\":\"%s\",\"file\":\"%s\",\"createdAt\":\"%s\",\"durationMs\":%u,\"sizeBytes\":%zu,\"status\":\"pending\",\"meetingId\":null,\"syncedAt\":null}",
+                                 record->id, basename + 1U, created_at, (unsigned)record->duration_ms,
+                                 record->size_bytes);
+    } else if (record->status == RECORDING_METADATA_STATUS_SYNCED &&
+               recording_metadata_is_safe_identifier(record->meeting_id, RECORDING_METADATA_MEETING_ID_MAX) &&
+               recording_metadata_is_rfc3339(record->synced_at)) {
+        written = created_at == NULL
+                      ? snprintf(output, output_size,
+                                 "{\"id\":\"%s\",\"file\":\"%s\",\"createdAt\":null,\"durationMs\":%u,\"sizeBytes\":%zu,\"status\":\"synced\",\"meetingId\":\"%s\",\"syncedAt\":\"%s\"}",
+                                 record->id, basename + 1U, (unsigned)record->duration_ms, record->size_bytes,
+                                 record->meeting_id, record->synced_at)
+                      : snprintf(output, output_size,
+                                 "{\"id\":\"%s\",\"file\":\"%s\",\"createdAt\":\"%s\",\"durationMs\":%u,\"sizeBytes\":%zu,\"status\":\"synced\",\"meetingId\":\"%s\",\"syncedAt\":\"%s\"}",
+                                 record->id, basename + 1U, created_at, (unsigned)record->duration_ms,
+                                 record->size_bytes, record->meeting_id, record->synced_at);
+    } else {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return written < 0 || (size_t)written >= output_size ? ESP_ERR_INVALID_SIZE : ESP_OK;
+}
+
+static bool recording_metadata_is_rfc3339(const char *value)
+{
+    if (value == NULL) {
+        return false;
+    }
+    const size_t length = strlen(value);
+    if (length < 20U || length >= 32U) {
+        return false;
+    }
+    const size_t fixed_digits[] = {0U, 1U, 2U, 3U, 5U, 6U, 8U, 9U, 11U, 12U, 14U, 15U, 17U, 18U};
+    for (size_t index = 0U; index < sizeof(fixed_digits) / sizeof(fixed_digits[0]); ++index) {
+        if (value[fixed_digits[index]] < '0' || value[fixed_digits[index]] > '9') {
+            return false;
+        }
+    }
+    if (value[4] != '-' || value[7] != '-' || value[10] != 'T' || value[13] != ':' || value[16] != ':') {
+        return false;
+    }
+    size_t timezone_offset = 19U;
+    if (value[timezone_offset] == '.') {
+        ++timezone_offset;
+        const size_t fractional_start = timezone_offset;
+        while (timezone_offset < length && value[timezone_offset] >= '0' && value[timezone_offset] <= '9') {
+            ++timezone_offset;
+        }
+        if (timezone_offset == fractional_start) {
+            return false;
+        }
+    }
+    if (timezone_offset + 1U == length) {
+        return value[timezone_offset] == 'Z';
+    }
+    return timezone_offset + 6U == length && (value[timezone_offset] == '+' || value[timezone_offset] == '-') &&
+           value[timezone_offset + 3U] == ':' && value[timezone_offset + 1U] >= '0' &&
+           value[timezone_offset + 1U] <= '9' && value[timezone_offset + 2U] >= '0' &&
+           value[timezone_offset + 2U] <= '9' && value[timezone_offset + 4U] >= '0' &&
+           value[timezone_offset + 4U] <= '9' && value[timezone_offset + 5U] >= '0' &&
+           value[timezone_offset + 5U] <= '9';
+}
+
+static bool recording_metadata_is_safe_identifier(const char *value, size_t maximum_length)
+{
+    if (value == NULL || value[0] == '\0' || strnlen(value, maximum_length + 1U) > maximum_length) {
+        return false;
+    }
+    for (size_t index = 0U; value[index] != '\0'; ++index) {
+        const char character = value[index];
+        if (!((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+              (character >= '0' && character <= '9') || character == '_' || character == '-')) {
+            return false;
+        }
+    }
+    return true;
 }
 
 

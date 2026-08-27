@@ -1,8 +1,17 @@
 #ifndef ONDA_API_CONFIG_LOCAL_H
 #define ONDA_API_CONFIG_LOCAL_H
 
-/* Copy this file to onda_api_config_local.h and set development-only values. */
-#define ONDA_API_LOCAL_BASE_URL "http://192.168.0.234:3000"
-#define ONDA_API_LOCAL_DEVICE_TOKEN "<device-token>"
+/*
+ * Copy this file to onda_api_config_local.h. This file is deliberately
+ * ignored by Git because the device token is a credential.
+ *
+ * Select one BFF environment by changing both values, then rebuild and flash.
+ * Do not use the production URL with a development token, or vice versa.
+ *
+ * Production:  https://onda-ai-rho.vercel.app
+ * Development: http://<development-host>:<port>
+ */
+#define ONDA_API_LOCAL_BASE_URL "https://onda-ai-rho.vercel.app"
+#define ONDA_API_LOCAL_DEVICE_TOKEN "<production-device-token>"
 
 #endif

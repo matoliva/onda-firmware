@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 #include "esp_err.h"
+#include "recording_metadata.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +29,22 @@ typedef struct {
     char server_time[ONDA_API_SERVER_TIME_MAX_LENGTH + 1U];
 } onda_api_device_identity_t;
 
+#define ONDA_API_MEETING_ID_MAX_LENGTH RECORDING_METADATA_MEETING_ID_MAX
+#define ONDA_API_SYNCED_AT_MAX_LENGTH 31U
+
+typedef enum {
+    ONDA_API_SYNC_SUCCESS,
+    ONDA_API_SYNC_RECORD_FAILURE,
+    ONDA_API_SYNC_CONNECTION_FAILURE,
+    ONDA_API_SYNC_AUTH_FAILURE,
+} onda_api_sync_outcome_t;
+
+typedef struct {
+    onda_api_sync_outcome_t outcome;
+    char meeting_id[ONDA_API_MEETING_ID_MAX_LENGTH + 1U];
+    char synced_at[ONDA_API_SYNCED_AT_MAX_LENGTH + 1U];
+} onda_api_sync_result_t;
+
 /** Initialise the device API worker. This does not issue a network request. */
 esp_err_t onda_api_init(void);
 
@@ -46,6 +63,16 @@ esp_err_t onda_api_parse_device_identity(const char *response,
 onda_api_state_t onda_api_resolve_state(esp_err_t request_result,
                                         int http_status,
                                         bool response_is_valid);
+
+/** Execute one BFF initiate → signed Blob PUT → complete transfer synchronously. */
+esp_err_t onda_api_sync_recording(const recording_metadata_record_t *record,
+                                  onda_api_sync_result_t *result);
+
+/** Parse a bounded BFF uploaded response before committing local metadata. */
+esp_err_t onda_api_parse_sync_success(const char *response,
+                                      size_t response_length,
+                                      const char *recording_id,
+                                      onda_api_sync_result_t *result);
 
 #ifdef __cplusplus
 }

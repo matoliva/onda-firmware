@@ -229,6 +229,41 @@ idf.py -p /dev/cu.usbmodemXXXX flash
 
 ---
 
+## Device Buttons and Battery Power
+
+The physical buttons have separate download and product behaviours.
+
+| Button / gesture | Device state | Behaviour |
+| --- | --- | --- |
+| **BOOT** short press | `READY` | Start recording. |
+| **BOOT** short press | `RECORDING` | Stop and finalize the recording. |
+| **BOOT** long press (~1 s) | `READY` | Start manual recording sync. |
+| **PWR** short press | `READY` | Enter deep sleep. |
+| **PWR** short press | Deep sleep | Wake and perform a clean boot. |
+| **PWR** double press | `READY` | Power off from battery. With USB connected, enter the equivalent off-sleep state instead. |
+| **PWR** hold (~3 s) | `READY` | Clear Wi-Fi credentials and start BLE provisioning. |
+
+PWR sleep and power-off requests are ignored while recording, finalizing, or
+synchronizing, protecting local audio and its metadata. A long PWR hold cancels
+any pending short press, so the three-second Wi-Fi reset cannot first enter
+sleep.
+
+### Battery-only operation
+
+The firmware asserts the board's `GPIO17` battery-power latch early in boot.
+When the device is already running from USB and a charged battery is connected,
+it should remain on when USB is unplugged. To start from a full battery-only
+off state, hold **PWR** until the device begins booting, then release it.
+
+The e-Paper panel retains its previous image during sleep and power-off; a
+screen that still reads `Ready` does not prove that the CPU remains awake.
+
+Power behaviour is hardware-dependent. The required physical validation steps
+are maintained in [`plans/015-power-management.md`](../plans/015-power-management.md).
+The plan is not accepted as a decision record until those checks have passed.
+
+---
+
 ## Project Configuration
 
 The reproducible project baseline is committed in:
@@ -275,6 +310,48 @@ This is used for settings such as:
 * compiler options
 
 Do not change configuration without understanding whether it should live in `sdkconfig` or `sdkconfig.defaults`.
+
+### BFF environment and device credential
+
+The device BFF endpoint and device token are intentionally local-only. Copy the
+tracked template once, then edit the copy:
+
+```bash
+cp components/onda_api/private_include/onda_api_config_local.h.example \
+  components/onda_api/private_include/onda_api_config_local.h
+```
+
+`onda_api_config_local.h` is ignored by Git. It contains the only active BFF
+environment; changing either environment requires rebuilding and reflashing.
+Set both values for the same environment:
+
+```c
+/* Production */
+#define ONDA_API_LOCAL_BASE_URL "https://onda-ai-rho.vercel.app"
+#define ONDA_API_LOCAL_DEVICE_TOKEN "<production-device-token>"
+```
+
+For development, replace both values with the development BFF base URL and its
+matching device token, for example `http://<development-host>:<port>`. The
+firmware appends `/api/device/recordings/initiate` and
+`/api/device/recordings/complete` itself; do not include either path in the
+base URL.
+
+Never commit or log a device token. A production URL with a development or
+missing token is expected to fail authorization (401/403).
+
+Production uses HTTPS with ESP-IDF's built-in root certificate bundle for both
+the BFF and signed Blob upload URL. Do not disable TLS server verification.
+
+After changing the local configuration:
+
+```bash
+get_idf
+idf.py build
+idf.py -p /dev/cu.usbmodemXXXX flash monitor
+```
+
+There is no runtime or UI environment selector.
 
 ---
 
