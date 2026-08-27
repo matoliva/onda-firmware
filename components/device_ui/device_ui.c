@@ -19,7 +19,8 @@ bool device_ui_should_refresh(const device_ui_state_t *previous,
 
     return next->primary_state != DEVICE_UI_PRIMARY_RECORDING &&
            (previous->wifi_status != next->wifi_status ||
-            previous->storage_status != next->storage_status);
+            previous->storage_status != next->storage_status ||
+            previous->battery_status != next->battery_status);
 }
 
 esp_err_t device_ui_describe(const device_ui_state_t *state,

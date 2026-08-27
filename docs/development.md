@@ -258,6 +258,20 @@ off state, hold **PWR** until the device begins booting, then release it.
 The e-Paper panel retains its previous image during sleep and power-off; a
 screen that still reads `Ready` does not prove that the CPU remains awake.
 
+### Battery indicator
+
+The status bar reports a coarse, calibrated battery-voltage level: high,
+medium, low, or critical. It samples GPIO4 through the board's battery divider
+at boot and then once per minute outside recording and finalization. A level
+change needs two consecutive samples before it refreshes the e-Paper display;
+recording never refreshes for battery status.
+
+The indicator is battery voltage only. It appears with or without USB power and
+does not indicate that the device is charging or identify the active power
+source. The board's physical charge LED remains the charging indication. If a
+valid ADC reading is unavailable, the battery icon is omitted rather than
+showing a placeholder.
+
 Power behaviour is hardware-dependent. The required physical validation steps
 are maintained in [`plans/015-power-management.md`](../plans/015-power-management.md).
 The plan is not accepted as a decision record until those checks have passed.

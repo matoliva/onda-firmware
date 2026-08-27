@@ -590,6 +590,9 @@ static void canvas_draw_battery_icon(display_battery_status_t status)
 {
     const uint16_t x = 153U;
     const uint16_t y = 10U;
+    if (status == DISPLAY_BATTERY_UNKNOWN) {
+        return;
+    }
     const uint8_t color = status == DISPLAY_BATTERY_CRITICAL ? EPD_COLOR_RED : EPD_COLOR_BLACK;
     uint16_t fill_width = 0U;
 
@@ -618,8 +621,6 @@ static void canvas_draw_battery_icon(display_battery_status_t status)
     canvas_fill_rect(x + 16U, y + 3U, 2U, 4U, color);
     if (fill_width > 0U) {
         canvas_fill_rect(x + 2U, y + 2U, fill_width, 6U, color);
-    } else {
-        canvas_draw_char(x + 5U, y - 1U, '?', 1U, color);
     }
 }
 
