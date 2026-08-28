@@ -35,6 +35,8 @@ TEST_CASE("device UI maps primary states to reusable screens", "[device_ui]")
         {DEVICE_UI_PRIMARY_SYNC_AUTH_ERROR, "SYNC ERROR", DISPLAY_COLOR_BLACK},
         {DEVICE_UI_PRIMARY_SYNC_CONNECTION_ERROR, "NO CONNECTION", DISPLAY_COLOR_BLACK},
         {DEVICE_UI_PRIMARY_WIFI_SETUP, "Wi-Fi setup", DISPLAY_COLOR_BLACK},
+        {DEVICE_UI_PRIMARY_SLEEPING, "Sleeping", DISPLAY_COLOR_BLACK},
+        {DEVICE_UI_PRIMARY_POWERING_OFF, "Powering off", DISPLAY_COLOR_BLACK},
         {DEVICE_UI_PRIMARY_STORAGE_ERROR, "NO SD CARD", DISPLAY_COLOR_BLACK},
         {DEVICE_UI_PRIMARY_AUDIO_ERROR, "AUDIO ERROR", DISPLAY_COLOR_BLACK},
         {DEVICE_UI_PRIMARY_ERROR, "Something went", DISPLAY_COLOR_BLACK},
@@ -47,6 +49,38 @@ TEST_CASE("device UI maps primary states to reusable screens", "[device_ui]")
         TEST_ASSERT_EQUAL(ESP_OK, device_ui_describe(&state, &screen));
         TEST_ASSERT_EQUAL_STRING(cases[index].title, screen.title);
         TEST_ASSERT_EQUAL(cases[index].title_color, screen.title_color);
+    }
+}
+
+TEST_CASE("Ready UI shows the complete button guide", "[device_ui]")
+{
+    const device_ui_state_t state = make_state(DEVICE_UI_PRIMARY_READY);
+    display_screen_t screen;
+
+    TEST_ASSERT_EQUAL(ESP_OK, device_ui_describe(&state, &screen));
+    TEST_ASSERT_EQUAL_STRING("BOOT: rec / hold: sync", screen.detail_first_line);
+    TEST_ASSERT_EQUAL_STRING("PWR: sleep / 2x: off", screen.detail_second_line);
+    TEST_ASSERT_EQUAL_STRING("PWR 3s: Wi-Fi reset", screen.detail_third_line);
+}
+
+TEST_CASE("power transition UI describes the next physical action", "[device_ui]")
+{
+    const struct {
+        device_ui_primary_state_t primary_state;
+        const char *detail;
+        display_color_t accent_color;
+    } cases[] = {
+        {DEVICE_UI_PRIMARY_SLEEPING, "Press PWR to wake", DISPLAY_COLOR_YELLOW},
+        {DEVICE_UI_PRIMARY_POWERING_OFF, "Hold PWR to start", DISPLAY_COLOR_RED},
+    };
+
+    for (size_t index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        const device_ui_state_t state = make_state(cases[index].primary_state);
+        display_screen_t screen;
+
+        TEST_ASSERT_EQUAL(ESP_OK, device_ui_describe(&state, &screen));
+        TEST_ASSERT_EQUAL_STRING(cases[index].detail, screen.detail_first_line);
+        TEST_ASSERT_EQUAL(cases[index].accent_color, screen.accent_color);
     }
 }
 
@@ -126,6 +160,21 @@ TEST_CASE("device UI refreshes a stable battery transition outside recording", "
     previous.primary_state = DEVICE_UI_PRIMARY_RECORDING;
     next.primary_state = DEVICE_UI_PRIMARY_RECORDING;
     TEST_ASSERT_FALSE(device_ui_should_refresh(&previous, &next));
+}
+
+TEST_CASE("device UI keeps pending power confirmations stable", "[device_ui]")
+{
+    device_ui_state_t previous = make_state(DEVICE_UI_PRIMARY_SLEEPING);
+    device_ui_state_t next = previous;
+
+    next.wifi_status = DEVICE_UI_WIFI_OFFLINE;
+    next.storage_status = DEVICE_UI_STORAGE_ERROR;
+    next.battery_status = DEVICE_UI_BATTERY_LOW;
+
+    TEST_ASSERT_FALSE(device_ui_should_refresh(&previous, &next));
+
+    next.primary_state = DEVICE_UI_PRIMARY_POWERING_OFF;
+    TEST_ASSERT_TRUE(device_ui_should_refresh(&previous, &next));
 }
 
 TEST_CASE("Saved UI requires duration and filename", "[device_ui]")
