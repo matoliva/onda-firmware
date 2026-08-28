@@ -43,6 +43,7 @@ typedef struct {
     const char *title;
     const char *detail_first_line;
     const char *detail_second_line;
+    const char *detail_third_line;
     const char *proof_of_possession;
     display_color_t title_color;
     display_color_t accent_color;

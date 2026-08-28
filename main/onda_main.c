@@ -46,6 +46,8 @@ static const char *TAG = "ONDA";
 
 typedef enum {
     ONDA_STATE_READY,
+    ONDA_STATE_SLEEPING,
+    ONDA_STATE_POWERING_OFF,
     ONDA_STATE_RECORDING,
     ONDA_STATE_FINALIZING,
     ONDA_STATE_SAVED,
@@ -62,6 +64,12 @@ typedef enum {
 } onda_state_t;
 
 typedef enum {
+    ONDA_POWER_ACTION_NONE,
+    ONDA_POWER_ACTION_SLEEP,
+    ONDA_POWER_ACTION_OFF,
+} onda_power_action_t;
+
+typedef enum {
     ONDA_COMMAND_TOGGLE_RECORDING,
     ONDA_COMMAND_RESET_WIFI,
     ONDA_COMMAND_WIFI_STATE_CHANGED,
@@ -72,6 +80,7 @@ typedef enum {
     ONDA_COMMAND_SYNC_COMPLETED,
     ONDA_COMMAND_ENTER_SLEEP,
     ONDA_COMMAND_POWER_OFF,
+    ONDA_COMMAND_POWER_SCREEN_RENDERED,
     ONDA_COMMAND_BATTERY_SAMPLE,
 } onda_command_t;
 
@@ -80,6 +89,7 @@ typedef struct {
     wifi_state_t wifi_state;
     audio_recorder_completion_t recorder_completion;
     recording_sync_completion_t sync_completion;
+    onda_power_action_t power_action;
     char proof_of_possession[DEVICE_UI_PROOF_OF_POSSESSION_LENGTH + 1U];
 } onda_application_command_t;
 
@@ -99,6 +109,7 @@ typedef struct {
 
 typedef struct {
     device_ui_state_t state;
+    onda_power_action_t power_action_after_render;
 } onda_display_request_t;
 
 static QueueHandle_t s_application_command_queue;
@@ -129,7 +140,10 @@ static void onda_show_sync_result(onda_application_model_t *model,
                                   size_t pending_count);
 static void onda_retry_storage(onda_application_model_t *model);
 static void onda_sample_battery(onda_application_model_t *model);
-static void onda_enter_sleep(onda_application_model_t *model, bool release_battery_latch);
+static void onda_begin_power_transition(onda_application_model_t *model,
+                                        onda_power_action_t action);
+static void onda_complete_power_transition(onda_application_model_t *model,
+                                           onda_power_action_t action);
 static void onda_enter_error(onda_application_model_t *model,
                              onda_state_t state,
                              const char *operation,
@@ -141,6 +155,7 @@ static esp_err_t onda_render_display(const device_ui_state_t *state);
 static device_ui_primary_state_t onda_select_ui_primary_state(const onda_application_model_t *model);
 static device_ui_wifi_status_t onda_select_ui_wifi_status(wifi_state_t state);
 static device_ui_battery_status_t onda_select_ui_battery_status(battery_status_t status);
+static bool onda_power_transition_pending(onda_state_t state);
 static const char *onda_state_name(onda_state_t state);
 static const char *onda_wifi_state_name(wifi_state_t state);
 
@@ -406,6 +421,13 @@ static void onda_display_task(void *context)
         if (result == ESP_OK) {
             last_rendered_state = request.state;
             has_rendered_state = true;
+            if (request.power_action_after_render != ONDA_POWER_ACTION_NONE) {
+                const onda_application_command_t command = {
+                    .command = ONDA_COMMAND_POWER_SCREEN_RENDERED,
+                    .power_action = request.power_action_after_render,
+                };
+                (void)xQueueSend(s_application_command_queue, &command, portMAX_DELAY);
+            }
             continue;
         }
         ESP_LOGE(TAG, "Failed to render display: %s", esp_err_to_name(result));
@@ -451,10 +473,13 @@ static void onda_handle_command(onda_application_model_t *model, const onda_appl
         onda_start_sync(model);
         break;
     case ONDA_COMMAND_ENTER_SLEEP:
-        onda_enter_sleep(model, false);
+        onda_begin_power_transition(model, ONDA_POWER_ACTION_SLEEP);
         break;
     case ONDA_COMMAND_POWER_OFF:
-        onda_enter_sleep(model, true);
+        onda_begin_power_transition(model, ONDA_POWER_ACTION_OFF);
+        break;
+    case ONDA_COMMAND_POWER_SCREEN_RENDERED:
+        onda_complete_power_transition(model, command->power_action);
         break;
     case ONDA_COMMAND_BATTERY_SAMPLE:
         onda_sample_battery(model);
@@ -479,7 +504,9 @@ static void onda_handle_command(onda_application_model_t *model, const onda_appl
                 }
             }
         }
-        (void)onda_schedule_display(model);
+        if (!onda_power_transition_pending(model->recording_state)) {
+            (void)onda_schedule_display(model);
+        }
         break;
     case ONDA_COMMAND_DISPLAY_FAILURE:
         if (model->recording_state != ONDA_STATE_ERROR) {
@@ -618,10 +645,34 @@ static void onda_stop_recording(onda_application_model_t *model)
     }
 }
 
-static void onda_enter_sleep(onda_application_model_t *model, bool release_battery_latch)
+static void onda_begin_power_transition(onda_application_model_t *model, onda_power_action_t action)
 {
     if (model == NULL || model->recording_state != ONDA_STATE_READY) {
         ESP_LOGW(TAG, "Ignoring power request unless recording is READY");
+        return;
+    }
+
+    if (action == ONDA_POWER_ACTION_SLEEP) {
+        model->recording_state = ONDA_STATE_SLEEPING;
+    } else if (action == ONDA_POWER_ACTION_OFF) {
+        model->recording_state = ONDA_STATE_POWERING_OFF;
+    } else {
+        ESP_LOGE(TAG, "Invalid requested power action");
+        return;
+    }
+
+    if (onda_schedule_display(model) != ESP_OK) {
+        onda_enter_error(model, ONDA_STATE_ERROR, "Power confirmation display request", ESP_FAIL, false);
+    }
+}
+
+static void onda_complete_power_transition(onda_application_model_t *model, onda_power_action_t action)
+{
+    const onda_state_t expected_state = action == ONDA_POWER_ACTION_SLEEP ? ONDA_STATE_SLEEPING :
+                                        action == ONDA_POWER_ACTION_OFF ? ONDA_STATE_POWERING_OFF :
+                                                                            ONDA_STATE_ERROR;
+    if (model == NULL || model->recording_state != expected_state) {
+        ESP_LOGW(TAG, "Ignoring stale power confirmation");
         return;
     }
 
@@ -630,7 +681,7 @@ static void onda_enter_sleep(onda_application_model_t *model, bool release_batte
         ESP_LOGW(TAG, "Wi-Fi cleanup before sleep failed: %s", esp_err_to_name(wifi_result));
     }
 
-    if (release_battery_latch) {
+    if (action == ONDA_POWER_ACTION_OFF) {
         ESP_LOGI(TAG, "Power-off requested");
         const esp_err_t latch_result = power_release_battery_latch();
         if (latch_result != ESP_OK) {
@@ -639,9 +690,11 @@ static void onda_enter_sleep(onda_application_model_t *model, bool release_batte
         }
     }
 
-    const esp_err_t sleep_result = release_battery_latch ? power_enter_off_sleep() : power_enter_sleep();
-    onda_enter_error(model, ONDA_STATE_ERROR,
-                     release_battery_latch ? "Power-off sleep entry" : "Sleep entry", sleep_result,
+    const esp_err_t sleep_result = action == ONDA_POWER_ACTION_OFF ? power_enter_off_sleep() :
+                                                                      power_enter_sleep();
+    onda_enter_error(model, ONDA_STATE_ERROR, action == ONDA_POWER_ACTION_OFF ? "Power-off sleep entry" :
+                                                                                  "Sleep entry",
+                     sleep_result,
                      false);
 }
 
@@ -756,8 +809,9 @@ static void onda_sample_battery(onda_application_model_t *model)
         return;
     }
     if (model->recording_state == ONDA_STATE_RECORDING ||
-        model->recording_state == ONDA_STATE_FINALIZING) {
-        ESP_LOGI("ONDA_BATTERY", "Deferring battery sample during recording work");
+        model->recording_state == ONDA_STATE_FINALIZING ||
+        onda_power_transition_pending(model->recording_state)) {
+        ESP_LOGI("ONDA_BATTERY", "Deferring battery sample during active work");
         return;
     }
 
@@ -838,6 +892,11 @@ static esp_err_t onda_schedule_display(const onda_application_model_t *model)
             .battery_status = onda_select_ui_battery_status(model->battery_status),
         },
     };
+    if (model->recording_state == ONDA_STATE_SLEEPING) {
+        request.power_action_after_render = ONDA_POWER_ACTION_SLEEP;
+    } else if (model->recording_state == ONDA_STATE_POWERING_OFF) {
+        request.power_action_after_render = ONDA_POWER_ACTION_OFF;
+    }
     if (request.state.primary_state == DEVICE_UI_PRIMARY_WIFI_SETUP) {
         strncpy(request.state.proof_of_possession, model->proof_of_possession,
                 sizeof(request.state.proof_of_possession) - 1U);
@@ -869,6 +928,10 @@ static esp_err_t onda_render_display(const device_ui_state_t *state)
 static device_ui_primary_state_t onda_select_ui_primary_state(const onda_application_model_t *model)
 {
     switch (model->recording_state) {
+    case ONDA_STATE_SLEEPING:
+        return DEVICE_UI_PRIMARY_SLEEPING;
+    case ONDA_STATE_POWERING_OFF:
+        return DEVICE_UI_PRIMARY_POWERING_OFF;
     case ONDA_STATE_RECORDING:
         return DEVICE_UI_PRIMARY_RECORDING;
     case ONDA_STATE_FINALIZING:
@@ -922,10 +985,17 @@ static device_ui_battery_status_t onda_select_ui_battery_status(battery_status_t
     }
 }
 
+static bool onda_power_transition_pending(onda_state_t state)
+{
+    return state == ONDA_STATE_SLEEPING || state == ONDA_STATE_POWERING_OFF;
+}
+
 static const char *onda_state_name(onda_state_t state)
 {
     switch (state) {
     case ONDA_STATE_READY: return "READY";
+    case ONDA_STATE_SLEEPING: return "SLEEPING";
+    case ONDA_STATE_POWERING_OFF: return "POWERING_OFF";
     case ONDA_STATE_RECORDING: return "RECORDING";
     case ONDA_STATE_FINALIZING: return "FINALIZING";
     case ONDA_STATE_SAVED: return "SAVED";

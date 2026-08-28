@@ -231,22 +231,26 @@ idf.py -p /dev/cu.usbmodemXXXX flash
 
 ## Device Buttons and Battery Power
 
-The physical buttons have separate download and product behaviours.
+The physical buttons have separate download and product behaviours. Product
+power controls apply only while Onda is `READY`; recording, finalization,
+saving, syncing, and error states ignore them to protect active work.
 
 | Button / gesture | Device state | Behaviour |
 | --- | --- | --- |
 | **BOOT** short press | `READY` | Start recording. |
 | **BOOT** short press | `RECORDING` | Stop and finalize the recording. |
 | **BOOT** long press (~1 s) | `READY` | Start manual recording sync. |
-| **PWR** short press | `READY` | Enter deep sleep. |
+| **PWR** short press | `READY` | Show the `Sleeping` confirmation, then enter deep sleep. Press PWR to wake and boot Onda again. |
 | **PWR** short press | Deep sleep | Wake and perform a clean boot. |
-| **PWR** double press | `READY` | Power off from battery. With USB connected, enter the equivalent off-sleep state instead. |
-| **PWR** hold (~3 s) | `READY` | Clear Wi-Fi credentials and start BLE provisioning. |
+| **PWR** double press | `READY` | Show the `Powering off` confirmation, then release battery power. With USB connected, Onda uses the off-sleep fallback. Hold PWR to start from battery-only off. |
+| **PWR** hold (~3 s) | `READY` | Clear Wi-Fi credentials and begin BLE reprovisioning. |
 
-PWR sleep and power-off requests are ignored while recording, finalizing, or
-synchronizing, protecting local audio and its metadata. A long PWR hold cancels
-any pending short press, so the three-second Wi-Fi reset cannot first enter
-sleep.
+The e-Paper panel retains the last completed image while Onda is asleep or
+powered off. Wait for the explicit power confirmation to finish refreshing
+before treating the action as complete.
+
+A long PWR hold cancels any pending short press, so the three-second Wi-Fi
+reset cannot first enter sleep.
 
 ### Battery-only operation
 
@@ -255,8 +259,8 @@ When the device is already running from USB and a charged battery is connected,
 it should remain on when USB is unplugged. To start from a full battery-only
 off state, hold **PWR** until the device begins booting, then release it.
 
-The e-Paper panel retains its previous image during sleep and power-off; a
-screen that still reads `Ready` does not prove that the CPU remains awake.
+The e-Paper panel retains its last power confirmation during sleep and
+power-off; it does not prove that the CPU remains awake.
 
 ### Battery indicator
 

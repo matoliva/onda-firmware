@@ -18,6 +18,8 @@ bool device_ui_should_refresh(const device_ui_state_t *previous,
     }
 
     return next->primary_state != DEVICE_UI_PRIMARY_RECORDING &&
+           next->primary_state != DEVICE_UI_PRIMARY_SLEEPING &&
+           next->primary_state != DEVICE_UI_PRIMARY_POWERING_OFF &&
            (previous->wifi_status != next->wifi_status ||
             previous->storage_status != next->storage_status ||
             previous->battery_status != next->battery_status);
@@ -73,6 +75,9 @@ esp_err_t device_ui_describe(const device_ui_state_t *state,
     case DEVICE_UI_PRIMARY_READY:
         screen->title = "Ready";
         screen->title_color = DISPLAY_COLOR_BLACK;
+        screen->detail_first_line = "BOOT: rec / hold: sync";
+        screen->detail_second_line = "PWR: sleep / 2x: off";
+        screen->detail_third_line = "PWR 3s: Wi-Fi reset";
         break;
     case DEVICE_UI_PRIMARY_RECORDING:
         screen->title = "Recording";
@@ -150,6 +155,18 @@ esp_err_t device_ui_describe(const device_ui_state_t *state,
         screen->detail_second_line = "to configure Onda";
         screen->proof_of_possession = state->proof_of_possession;
         screen->accent_color = DISPLAY_COLOR_YELLOW;
+        break;
+    case DEVICE_UI_PRIMARY_SLEEPING:
+        screen->title = "Sleeping";
+        screen->title_color = DISPLAY_COLOR_BLACK;
+        screen->detail_first_line = "Press PWR to wake";
+        screen->accent_color = DISPLAY_COLOR_YELLOW;
+        break;
+    case DEVICE_UI_PRIMARY_POWERING_OFF:
+        screen->title = "Powering off";
+        screen->title_color = DISPLAY_COLOR_BLACK;
+        screen->detail_first_line = "Hold PWR to start";
+        screen->accent_color = DISPLAY_COLOR_RED;
         break;
     case DEVICE_UI_PRIMARY_STORAGE_ERROR:
         screen->title = "NO SD CARD";

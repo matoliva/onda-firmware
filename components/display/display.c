@@ -157,6 +157,9 @@ esp_err_t display_show(const display_screen_t *screen)
     if (screen->detail_second_line != NULL) {
         canvas_draw_centered_text(screen->detail_second_line, 128, 1, EPD_COLOR_BLACK);
     }
+    if (screen->detail_third_line != NULL) {
+        canvas_draw_centered_text(screen->detail_third_line, 144, 1, EPD_COLOR_BLACK);
+    }
     if (screen->proof_of_possession != NULL) {
         canvas_draw_centered_text("PoP", 150, 1, EPD_COLOR_BLACK);
         canvas_draw_centered_text(screen->proof_of_possession, 166, 1, accent_color);
