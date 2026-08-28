@@ -22,6 +22,7 @@
 #define ONDA_API_TASK_STACK_SIZE 4096U
 #define ONDA_API_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
 #define ONDA_API_REQUEST_TIMEOUT_MS 5000U
+#define ONDA_API_UPLOAD_TIMEOUT_MS (60U * 1000U)
 #define ONDA_API_ENDPOINT_MAX_LENGTH 192U
 #define ONDA_API_TOKEN_MAX_LENGTH 128U
 #define ONDA_API_AUTHORIZATION_MAX_LENGTH (sizeof("Bearer ") + ONDA_API_TOKEN_MAX_LENGTH)
@@ -653,7 +654,7 @@ static esp_err_t onda_api_upload_wav(const recording_metadata_record_t *record,
     const esp_http_client_config_t config = {
         .url = upload->url,
         .method = HTTP_METHOD_PUT,
-        .timeout_ms = ONDA_API_REQUEST_TIMEOUT_MS,
+        .timeout_ms = ONDA_API_UPLOAD_TIMEOUT_MS,
         .disable_auto_redirect = true,
         .buffer_size = ONDA_API_UPLOAD_BUFFER_SIZE,
         .buffer_size_tx = ONDA_API_UPLOAD_REQUEST_BUFFER_SIZE,
