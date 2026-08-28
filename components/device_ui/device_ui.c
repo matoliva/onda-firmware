@@ -113,7 +113,7 @@ esp_err_t device_ui_describe(const device_ui_state_t *state,
         screen->accent_color = DISPLAY_COLOR_YELLOW;
         break;
     case DEVICE_UI_PRIMARY_SYNC_PARTIAL:
-        screen->title = "SYNC COMPLETE";
+        screen->title = "SYNC PARTIAL";
         screen->title_color = DISPLAY_COLOR_BLACK;
         screen->detail_first_line = state->sync_detail_first_line;
         screen->detail_second_line = state->sync_detail_second_line;
